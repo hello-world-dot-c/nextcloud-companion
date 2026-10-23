@@ -1,0 +1,12 @@
+# Build output
+bin/
+obj/
+artifacts/
+
+# IDE / user files
+.vs/
+*.user
+*.suo
+
+# Python
+__pycache__/
