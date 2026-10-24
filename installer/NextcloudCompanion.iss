@@ -56,6 +56,26 @@ Name: "{userstartup}\{#AppName}"; Filename: "{app}\{#AppExe}"; Comment: "{#AppNa
 Type: files; Name: "{userstartup}\{#LegacyAppName}.lnk"
 Type: files; Name: "{autoprograms}\{#LegacyAppName}.lnk"
 Type: files; Name: "{autodesktop}\{#LegacyAppName}.lnk"
+; Older versions shipped a self-contained build (own runtime, language folders). Left in place next to
+; the framework-dependent exe they make the app host use the stale runtime and report "install .NET".
+; Only cleaned up when that old runtime is found (hostfxr.dll is not part of the current files).
+Type: files; Name: "{app}\*.dll"; Check: IsOldSelfContainedInstall
+Type: files; Name: "{app}\*.json"; Check: IsOldSelfContainedInstall
+Type: files; Name: "{app}\createdump.exe"; Check: IsOldSelfContainedInstall
+Type: files; Name: "{app}\*.pdb"; Check: IsOldSelfContainedInstall
+Type: filesandordirs; Name: "{app}\cs"; Check: IsOldSelfContainedInstall
+Type: filesandordirs; Name: "{app}\de"; Check: IsOldSelfContainedInstall
+Type: filesandordirs; Name: "{app}\es"; Check: IsOldSelfContainedInstall
+Type: filesandordirs; Name: "{app}\fr"; Check: IsOldSelfContainedInstall
+Type: filesandordirs; Name: "{app}\it"; Check: IsOldSelfContainedInstall
+Type: filesandordirs; Name: "{app}\ja"; Check: IsOldSelfContainedInstall
+Type: filesandordirs; Name: "{app}\ko"; Check: IsOldSelfContainedInstall
+Type: filesandordirs; Name: "{app}\pl"; Check: IsOldSelfContainedInstall
+Type: filesandordirs; Name: "{app}\pt-BR"; Check: IsOldSelfContainedInstall
+Type: filesandordirs; Name: "{app}\ru"; Check: IsOldSelfContainedInstall
+Type: filesandordirs; Name: "{app}\tr"; Check: IsOldSelfContainedInstall
+Type: filesandordirs; Name: "{app}\zh-Hans"; Check: IsOldSelfContainedInstall
+Type: filesandordirs; Name: "{app}\zh-Hant"; Check: IsOldSelfContainedInstall
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
@@ -64,3 +84,20 @@ Filename: "{app}\{#AppExe}"; Description: "Launch {#AppName}"; Flags: nowait pos
 ; The app may re-create the startup shortcut itself via its tray menu.
 Type: files; Name: "{userstartup}\{#AppName}.lnk"
 Type: files; Name: "{userstartup}\{#LegacyAppName}.lnk"
+
+[Code]
+var
+  OldRuntimeState: Integer; { 0 = not checked, 1 = old self-contained install found, 2 = none }
+
+{ Evaluated once, before the first InstallDelete entry removes hostfxr.dll itself. }
+function IsOldSelfContainedInstall: Boolean;
+begin
+  if OldRuntimeState = 0 then
+  begin
+    if FileExists(ExpandConstant('{app}\hostfxr.dll')) then
+      OldRuntimeState := 1
+    else
+      OldRuntimeState := 2;
+  end;
+  Result := OldRuntimeState = 1;
+end;
