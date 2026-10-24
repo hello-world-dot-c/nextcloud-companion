@@ -7,8 +7,12 @@ namespace NextcloudCompanion;
 /// <summary>
 /// Compact flyout near the tray. Closing the X hides it; it is never disposed while the tray runs.
 /// </summary>
-internal sealed class StatusWindow : Form
+internal sealed class StatusWindow : Form, IDpiTracked
 {
+    private int _trackedDpi;
+
+    public int TrackedDpi => _trackedDpi;
+
     private readonly Panel _body;
     private bool _allowDeactivateClose;
     private ClientStatus? _shown;
@@ -44,7 +48,7 @@ internal sealed class StatusWindow : Form
     {
         _shown = status;
         EnsureHandleOn(nearTray);
-        int dpi = DeviceDpi > 0 ? DeviceDpi : Dpi.ForPoint(nearTray);
+        int dpi = Dpi.Of(this);
         ApplyFont(dpi);
         Rebuild(status, nearTray, dpi);
         PositionNear(nearTray);
@@ -61,6 +65,12 @@ internal sealed class StatusWindow : Form
             _allowDeactivateClose = true;
         };
         t.Start();
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        _trackedDpi = Dpi.OfWindow(this);
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -86,13 +96,21 @@ internal sealed class StatusWindow : Form
     protected override void OnDpiChanged(DpiChangedEventArgs e)
     {
         base.OnDpiChanged(e);
+        _trackedDpi = e.DeviceDpiNew > 0 ? e.DeviceDpiNew : Dpi.OfWindow(this);
         if (_shown is null)
             return;
-        int dpi = e.DeviceDpiNew > 0 ? e.DeviceDpiNew : Dpi.ForPoint(new Point(Left, Top));
-        ApplyFont(dpi);
+        // WinForms rescales the fonts of existing children after this handler returns, so
+        // controls built here would be scaled twice. Rebuild once it has finished.
         var anchor = new Point(Left + Math.Max(1, Width / 2), Top + Math.Max(1, Height / 2));
-        Rebuild(_shown, anchor, dpi);
-        PositionNear(anchor);
+        BeginInvoke(() =>
+        {
+            if (IsDisposed || _shown is null)
+                return;
+            int dpi = Dpi.Of(this);
+            ApplyFont(dpi);
+            Rebuild(_shown, anchor, dpi);
+            PositionNear(anchor);
+        });
     }
 
     /// <summary>

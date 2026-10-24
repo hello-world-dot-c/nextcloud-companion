@@ -22,7 +22,7 @@ The executable is `NextcloudCompanion.exe`. Nextcloud Companion is an independen
 
 ## Install
 
-Download `NextcloudCompanion-Setup-<version>.exe` and run it. It installs for the current user only, to `%LOCALAPPDATA%\Programs\Nextcloud Companion`, and needs no administrator rights. It bundles .NET, so nothing else has to be installed. Optionally it starts the app when you sign in to Windows. To remove it, use **Settings → Apps → Installed apps**.
+Download `NextcloudCompanion-Setup-<version>.exe` and run it. It installs for the current user only, to `%LOCALAPPDATA%\Programs\Nextcloud Companion`, and needs no administrator rights. The installer is small (about 3 MB) because it does not include .NET: the app needs the [.NET Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) (version 8 or newer, x64). If it is missing, Windows says so when you start the app and offers to open the download page; install the runtime and start the app again. Optionally the installer also starts the app when you sign in to Windows. To remove it, use **Settings → Apps → Installed apps**.
 
 The installer is not code-signed, so Windows SmartScreen may warn the first time you run it. To build it yourself, see [Build and run](#build-and-run).
 
@@ -83,7 +83,7 @@ People and groups come from the Files sharing search (`sharees`) and from CardDA
 
 - Windows 64-bit
 - The Nextcloud desktop client, already signed in (search and status only need its files on disk)
-- .NET is not required for the published build; the installer and the self-contained publish include the runtime
+- The .NET 8 (or newer) Desktop Runtime, x64. It is not bundled; Windows offers to download it the first time the app starts without it. To build from source you need the .NET 8 SDK or newer
 - Inno Setup 6, only if you build the installer
 
 ## Build and run
@@ -94,11 +94,11 @@ From this directory:
 dotnet run --project NextcloudCompanion\NextcloudCompanion.csproj -c Release
 ```
 
-Publish a self-contained build and replace a running copy:
+Publish a framework-dependent build (needs the Desktop Runtime to run) and replace a running copy:
 
 ```powershell
 Get-Process NextcloudCompanion -ErrorAction SilentlyContinue | Stop-Process
-dotnet publish NextcloudCompanion\NextcloudCompanion.csproj -c Release -r win-x64 --self-contained true -o "$env:LOCALAPPDATA\Programs\Nextcloud Companion"
+dotnet publish NextcloudCompanion\NextcloudCompanion.csproj -c Release -r win-x64 --self-contained false -o "$env:LOCALAPPDATA\Programs\Nextcloud Companion"
 Start-Process "$env:LOCALAPPDATA\Programs\Nextcloud Companion\NextcloudCompanion.exe"
 ```
 
@@ -130,6 +130,7 @@ Output: `artifacts\installer\NextcloudCompanion-Setup-<version>.exe`. The same t
 | `NextcloudCompanion/FileSearch.cs`, `SearchWindow.cs` | Journal search and results |
 | `NextcloudCompanion/CalendarClient.cs`, `MeetingWindow.cs` | CalDAV / OCS meeting dialog |
 | `NextcloudCompanion/Settings.cs`, `SecretStore.cs` | Settings and DPAPI app passwords |
+| `NextcloudCompanion/Dpi.cs`, `DpiForm.cs` | Per-monitor DPI handling: windows re-scale when the DPI or scale factor changes |
 | `installer/NextcloudCompanion.iss` | Inno Setup script |
 | `build-installer.ps1`, `build-installer.cmd` | Publish, then compile the installer |
 | `NextcloudCompanion/app.ico`, `tools/make-icon.py` | Program icon and the script that generates it |

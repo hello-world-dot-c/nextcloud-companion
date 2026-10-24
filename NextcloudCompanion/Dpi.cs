@@ -2,19 +2,43 @@ using System.Runtime.InteropServices;
 
 namespace NextcloudCompanion;
 
+/// <summary>A window that remembers the DPI it was last told about (creation or WM_DPICHANGED).</summary>
+internal interface IDpiTracked
+{
+    int TrackedDpi { get; }
+}
+
 internal static class Dpi
 {
     public static int System => (int)GetDpiForSystem();
 
-    public static float Factor(Control c)
+    /// <summary>
+    /// The DPI of the monitor the window is on right now (asked from Windows, not WinForms'
+    /// cached DeviceDpi, which lags behind while a DPI change is being processed).
+    /// </summary>
+    public static int Of(Control c)
     {
-        int dpi = c.IsHandleCreated && c.DeviceDpi > 0 ? c.DeviceDpi : System;
-        if (dpi <= 0) dpi = 96;
-        return dpi / 96f;
+        if (c is IDpiTracked { TrackedDpi: > 0 } tracked)
+            return tracked.TrackedDpi;
+        return OfWindow(c);
     }
 
-    public static int Px(Control c, int designPx)
-        => Px(c.IsHandleCreated && c.DeviceDpi > 0 ? c.DeviceDpi : System, designPx);
+    /// <summary>Asks Windows for the window's DPI (falls back to the system DPI before a handle exists).</summary>
+    public static int OfWindow(Control c)
+    {
+        int dpi = 0;
+        if (c.IsHandleCreated)
+        {
+            try { dpi = (int)GetDpiForWindow(c.Handle); }
+            catch { dpi = c.DeviceDpi; }
+        }
+        if (dpi <= 0) dpi = System;
+        return dpi > 0 ? dpi : 96;
+    }
+
+    public static float Factor(Control c) => Of(c) / 96f;
+
+    public static int Px(Control c, int designPx) => Px(Of(c), designPx);
 
     public static int Px(int dpi, int designPx)
     {
@@ -71,6 +95,9 @@ internal static class Dpi
 
     [DllImport("user32.dll")]
     private static extern uint GetDpiForSystem();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(IntPtr hwnd);
 
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromPoint(POINT pt, uint flags);

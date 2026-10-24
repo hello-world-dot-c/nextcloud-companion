@@ -9,14 +9,18 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>NextcloudCompanion</AssemblyName>
     <RootNamespace>NextcloudCompanion</RootNamespace>
-    <Version>1.0.9</Version>
-    <AssemblyVersion>1.0.9.0</AssemblyVersion>
-    <FileVersion>1.0.9.0</FileVersion>
+    <Version>1.0.10</Version>
+    <AssemblyVersion>1.0.10.0</AssemblyVersion>
+    <FileVersion>1.0.10.0</FileVersion>
     <Product>Nextcloud Companion</Product>
     <AssemblyTitle>Nextcloud Companion</AssemblyTitle>
     <Description>System tray companion for Nextcloud desktop: status, search, and full paths</Description>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>app.ico</ApplicationIcon>
+    <!-- Framework-dependent: the .NET Desktop Runtime is not shipped. The app host shows Windows' own
+         "install .NET" prompt when it is missing. A newer major runtime is accepted if 8 is absent. -->
+    <RollForward>Major</RollForward>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
   </PropertyGroup>
 

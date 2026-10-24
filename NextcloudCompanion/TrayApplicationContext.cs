@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Reflection;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace NextcloudCompanion;
 
@@ -16,6 +17,8 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _itemStartup;
     private readonly System.Windows.Forms.Timer _pollTimer;
     private readonly StatusMonitor _monitor = new();
+    private readonly Control _ui = new();
+    private readonly List<ToolStripLabel> _boldLabels = [];
 
     private StatusWindow? _window;
     private SearchWindow? _searchWindow;
@@ -32,6 +35,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             ForeColor = SystemColors.GrayText,
             Enabled = false
         };
+        _boldLabels.Add(_itemStatus);
 
         _itemNotify = new ToolStripMenuItem("Notify when a new error appears", null, OnToggleNotify)
         {
@@ -70,6 +74,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             new ToolStripSeparator(),
             new ToolStripMenuItem("Exit", null, OnExit)
         ]);
+        _boldLabels.Add((ToolStripLabel)_menu.Items[0]);
         _menu.Opening += (_, _) =>
         {
             _itemStatus.Text = TruncateTip(_monitor.Snapshot.Summary, 80);
@@ -87,9 +92,39 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         ApplyStatus(_monitor.Scan(), notify: false);
 
+        // Docking, undocking, a changed scale factor or an RDP session with another
+        // resolution: redraw the tray icon and menu fonts for the new DPI.
+        _ = _ui.Handle; // marshals the event back onto the UI thread
+        SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+
         _pollTimer = new System.Windows.Forms.Timer { Interval = 4000 };
         _pollTimer.Tick += OnPollTick;
         _pollTimer.Start();
+    }
+
+    private void OnDisplaySettingsChanged(object? sender, EventArgs e)
+    {
+        // Raised on a system-events thread.
+        void Refresh()
+        {
+            try
+            {
+                foreach (var label in _boldLabels)
+                {
+                    var old = label.Font;
+                    label.Font = new Font(SystemFonts.MenuFont!, FontStyle.Bold);
+                    old.Dispose();
+                }
+                ApplyStatus(_monitor.Snapshot, notify: false);
+            }
+            catch (Exception ex)
+            {
+                ErrorLog.Write("Display change handling failed", ex);
+            }
+        }
+
+        if (_ui.IsHandleCreated && !_ui.IsDisposed)
+            _ui.BeginInvoke(Refresh);
     }
 
     private void OnPollTick(object? sender, EventArgs e)
@@ -106,9 +141,8 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private void ApplyStatus(ClientStatus status, bool notify)
     {
-        int iconDpi = _window is { IsDisposed: false, IsHandleCreated: true }
-            ? _window.DeviceDpi
-            : Dpi.ForPoint(Screen.PrimaryScreen?.WorkingArea.Location ?? Cursor.Position);
+        // The notification area lives on the primary monitor's taskbar.
+        int iconDpi = Dpi.ForPoint(Screen.PrimaryScreen?.WorkingArea.Location ?? Cursor.Position);
         Icon newIcon = IconHelper.Create(status.Overall, iconDpi);
         Icon? old = _currentIcon;
         _trayIcon.Icon = newIcon;
@@ -155,7 +189,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private StatusWindow WindowFor(Point near)
     {
         int dpi = Dpi.ForPoint(near);
-        if (_window is { IsDisposed: false, IsHandleCreated: true } && Math.Abs(_window.DeviceDpi - dpi) > 1)
+        if (_window is { IsDisposed: false, IsHandleCreated: true } && Math.Abs(Dpi.Of(_window) - dpi) > 1)
         {
             _window.HideInsteadOfClose = false;
             _window.Dispose();
@@ -316,6 +350,8 @@ public sealed class TrayApplicationContext : ApplicationContext
         if (disposing)
         {
             _pollTimer.Stop();
+            SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+            _ui.Dispose();
             _pollTimer.Dispose();
             _window?.Dispose();
             _searchWindow?.Dispose();

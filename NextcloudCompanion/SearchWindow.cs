@@ -9,7 +9,7 @@ namespace NextcloudCompanion;
 /// Stays open (unlike the status flyout) so paths can be copied. Shows the full
 /// Nextcloud-internal path that the web UI search omits.
 /// </summary>
-internal sealed class SearchWindow : Form
+internal sealed class SearchWindow : DpiForm
 {
     private readonly Func<IReadOnlyList<FolderStatus>> _folders;
     private readonly ComboBox _query;
@@ -36,10 +36,6 @@ internal sealed class SearchWindow : Form
         ShowInTaskbar = true;
         MinimizeBox = true;
         MaximizeBox = true;
-        // Point fonts already follow DPI. AutoScaleMode.Dpi would scale them again
-        // and still leave the old absolute coordinates behind.
-        AutoScaleMode = AutoScaleMode.None;
-        Font = new Font("Segoe UI", 9f, FontStyle.Regular, GraphicsUnit.Point);
         KeyPreview = true;
 
         int pad = Math.Max(8, Font.Height * 2 / 3);
@@ -186,7 +182,10 @@ internal sealed class SearchWindow : Form
         Controls.Add(root);
         AcceptButton = _searchButton;
         Resize += (_, _) => FitColumns();
+        CaptureDesign();
     }
+
+    protected override void OnDpiApplied() => FitColumns();
 
     /// <summary>
     /// Size to the screen (never larger than the working area) and open
@@ -254,7 +253,6 @@ internal sealed class SearchWindow : Form
     {
         base.OnDpiChanged(e);
         FitAndPlaceBottomRight(_placeNear == Point.Empty ? Cursor.Position : _placeNear);
-        FitColumns();
     }
 
     private void FitAndPlaceBottomRight(Point near)

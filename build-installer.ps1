@@ -2,7 +2,8 @@
 .SYNOPSIS
   Publishes Nextcloud Companion and builds the per-user Windows installer (no admin rights needed).
 .DESCRIPTION
-  1. dotnet publish (self-contained win-x64, so the user does not need to install .NET)
+  1. dotnet publish (framework-dependent win-x64 single file; the .NET Desktop Runtime is not bundled.
+     If it is missing, Windows tells the user and offers to open the download page when the app starts)
   2. Inno Setup (ISCC) compiles installer\NextcloudCompanion.iss
   Output: artifacts\installer\NextcloudCompanion-Setup-<version>.exe
 #>
@@ -31,7 +32,7 @@ if (-not $iscc) { throw 'Inno Setup 6 (ISCC.exe) not found. Install it from http
 if (Test-Path $publish) { Remove-Item $publish -Recurse -Force }
 
 Write-Host "Publishing $version ($Configuration, $Runtime)..."
-dotnet publish $csproj -c $Configuration -r $Runtime --self-contained true -o $publish
+dotnet publish $csproj -c $Configuration -r $Runtime --self-contained false -p:PublishSingleFile=true -o $publish
 if ($LASTEXITCODE -ne 0) { throw 'dotnet publish failed' }
 
 Write-Host 'Building installer...'

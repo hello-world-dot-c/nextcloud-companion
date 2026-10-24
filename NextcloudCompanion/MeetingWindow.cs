@@ -7,7 +7,7 @@ namespace NextcloudCompanion;
 /// Creates an event on a calendar the signed-in account can write, including calendars
 /// shared with that account, and adds internal users or groups as attendees.
 /// </summary>
-internal sealed class MeetingWindow : Form
+internal sealed class MeetingWindow : DpiForm
 {
     private readonly Func<IReadOnlyList<FolderStatus>> _folders;
     private readonly ComboBox _account;
@@ -44,8 +44,6 @@ internal sealed class MeetingWindow : Form
         ShowInTaskbar = true;
         MinimizeBox = true;
         MaximizeBox = true;
-        AutoScaleMode = AutoScaleMode.None;
-        Font = new Font("Segoe UI", 9f, FontStyle.Regular, GraphicsUnit.Point);
         KeyPreview = true;
 
         int gap = Math.Max(6, Font.Height / 2);
@@ -216,6 +214,7 @@ internal sealed class MeetingWindow : Form
         _account.SelectedIndexChanged += async (_, _) => await OnAccountChangedAsync();
         AcceptButton = _create;
         CancelButton = cancel;
+        CaptureDesign();
     }
 
     public void ShowNear(Point near)
