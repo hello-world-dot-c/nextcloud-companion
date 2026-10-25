@@ -18,7 +18,15 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly System.Windows.Forms.Timer _pollTimer;
     private readonly StatusMonitor _monitor = new();
     private readonly Control _ui = new();
-    private readonly List<ToolStripLabel> _boldLabels = [];
+
+    // The DPI of the primary monitor when this process started. WinForms keeps deriving internals (menu item
+    // spacing, image sizes, paddings) from the DPI a process started with and does not fully recover when the
+    // display changes later (docking, undocking, RDP from a device with other scaling). The reliable cure is a
+    // fresh process, so a lasting change of the primary monitor's DPI restarts the app.
+    private readonly int _startDpi = Dpi.Primary();
+    private readonly System.Windows.Forms.Timer _restartTimer = new() { Interval = 2500 };
+    private bool _restarting;
+    private readonly List<ToolStripItem> _boldLabels = [];
 
     private StatusWindow? _window;
     private SearchWindow? _searchWindow;
@@ -31,7 +39,6 @@ public sealed class TrayApplicationContext : ApplicationContext
     {
         _itemStatus = new ToolStripLabel("Checking Nextcloud…")
         {
-            Font = new Font(SystemFonts.MenuFont!, FontStyle.Bold),
             ForeColor = SystemColors.GrayText,
             Enabled = false
         };
@@ -54,11 +61,10 @@ public sealed class TrayApplicationContext : ApplicationContext
         _menu = new ContextMenuStrip();
         _menu.Items.AddRange(
         [
-            new ToolStripLabel($"{AppInfo.Name} v{AppVersion}")
+            // Title line: name and version; a click opens the project page.
+            new ToolStripMenuItem($"{AppInfo.Name} v{AppVersion}", null, OnOpenRepository)
             {
-                Font = new Font(SystemFonts.MenuFont!, FontStyle.Bold),
-                ForeColor = SystemColors.GrayText,
-                Enabled = false
+                ToolTipText = "Click to show GitHub page"
             },
             _itemStatus,
             new ToolStripSeparator(),
@@ -74,9 +80,18 @@ public sealed class TrayApplicationContext : ApplicationContext
             new ToolStripSeparator(),
             new ToolStripMenuItem("Exit", null, OnExit)
         ]);
-        _boldLabels.Add((ToolStripLabel)_menu.Items[0]);
+        _boldLabels.Add(_menu.Items[0]);
         _menu.Opening += (_, _) =>
         {
+            // Bold title lines are derived from the strip's own font each time: SystemFonts and fonts cached
+            // earlier belong to the DPI the process started with.
+            foreach (var label in _boldLabels)
+            {
+                var old = label.Font;
+                label.Font = new Font(_menu.Font, FontStyle.Bold);
+                if (!ReferenceEquals(old, _menu.Font))
+                    old.Dispose();
+            }
             _itemStatus.Text = TruncateTip(_monitor.Snapshot.Summary, 80);
             _itemNotify.Checked = Settings.NotifyOnError;
             _itemStartup.Checked = StartupShortcut.Exists();
@@ -94,12 +109,24 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         // Docking, undocking, a changed scale factor or an RDP session with another
         // resolution: redraw the tray icon and menu fonts for the new DPI.
+        _restartTimer.Tick += (_, _) => OnRestartTimer();
         _ = _ui.Handle; // marshals the event back onto the UI thread
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+        SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
 
         _pollTimer = new System.Windows.Forms.Timer { Interval = 4000 };
         _pollTimer.Tick += OnPollTick;
         _pollTimer.Start();
+    }
+
+    // Some scale-factor changes (notably RDP) only raise this one. It fires often, so only act on a real DPI change.
+    private int _iconDpi;
+
+    private void OnUserPreferenceChanged(object? sender, UserPreferenceChangedEventArgs e)
+    {
+        if (_iconDpi == Dpi.Primary())
+            return;
+        OnDisplaySettingsChanged(sender, e);
     }
 
     private void OnDisplaySettingsChanged(object? sender, EventArgs e)
@@ -109,13 +136,9 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             try
             {
-                foreach (var label in _boldLabels)
-                {
-                    var old = label.Font;
-                    label.Font = new Font(SystemFonts.MenuFont!, FontStyle.Bold);
-                    old.Dispose();
-                }
                 ApplyStatus(_monitor.Snapshot, notify: false);
+                _restartTimer.Stop();       // debounce: the display settles over a few seconds
+                _restartTimer.Start();
             }
             catch (Exception ex)
             {
@@ -125,6 +148,30 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         if (_ui.IsHandleCreated && !_ui.IsDisposed)
             _ui.BeginInvoke(Refresh);
+    }
+
+    private void OnRestartTimer()
+    {
+        _restartTimer.Stop();
+        if (!_restarting && Dpi.Primary() != _startDpi)
+            RestartSelf();
+    }
+
+    /// <summary>Starts a new instance and exits; the new one waits for the single-instance mutex (--restarted).</summary>
+    private void RestartSelf()
+    {
+        _restarting = true;
+        try
+        {
+            Process.Start(new ProcessStartInfo(Environment.ProcessPath!, "--restarted") { UseShellExecute = false });
+        }
+        catch (Exception ex)
+        {
+            ErrorLog.Write("Restart after a display change failed", ex);
+            _restarting = false;
+            return;
+        }
+        OnExit(null, EventArgs.Empty);
     }
 
     private void OnPollTick(object? sender, EventArgs e)
@@ -143,6 +190,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     {
         // The notification area lives on the primary monitor's taskbar.
         int iconDpi = Dpi.ForPoint(Screen.PrimaryScreen?.WorkingArea.Location ?? Cursor.Position);
+        _iconDpi = iconDpi;
         Icon newIcon = IconHelper.Create(status.Overall, iconDpi);
         Icon? old = _currentIcon;
         _trayIcon.Icon = newIcon;
@@ -217,7 +265,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         catch (Exception ex)
         {
             ErrorLog.Write("Show status failed", ex);
-            MessageBox.Show(
+            Dialogs.Message(
                 "Could not open the status window.\n\n" + ex.Message,
                 AppInfo.Name,
                 MessageBoxButtons.OK,
@@ -238,7 +286,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         catch (Exception ex)
         {
             ErrorLog.Write("Show search failed", ex);
-            MessageBox.Show(
+            Dialogs.Message(
                 "Could not open search.\n\n" + ex.Message,
                 AppInfo.Name,
                 MessageBoxButtons.OK,
@@ -257,11 +305,25 @@ public sealed class TrayApplicationContext : ApplicationContext
         catch (Exception ex)
         {
             ErrorLog.Write("Show meeting failed", ex);
-            MessageBox.Show(
+            Dialogs.Message(
                 "Could not open the meeting window.\n\n" + ex.Message,
                 AppInfo.Name,
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
+        }
+    }
+
+    private void OnOpenRepository(object? s, EventArgs e)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo { FileName = AppInfo.RepositoryUrl, UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            ErrorLog.Write("Could not open the GitHub page", ex);
+            Dialogs.Message("Could not open the GitHub page.\n\n" + AppInfo.RepositoryUrl + "\n\n" + ex.Message,
+                AppInfo.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 
@@ -278,7 +340,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
         catch (Exception ex)
         {
-            MessageBox.Show("Could not start the Nextcloud client.\n\n" + ex.Message,
+            Dialogs.Message("Could not start the Nextcloud client.\n\n" + ex.Message,
                 AppInfo.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
@@ -328,7 +390,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         catch (Exception ex)
         {
             _itemStartup.Checked = StartupShortcut.Exists();
-            MessageBox.Show("Could not update the startup shortcut.\n\n" + ex.Message,
+            Dialogs.Message("Could not update the startup shortcut.\n\n" + ex.Message,
                 AppInfo.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
@@ -351,6 +413,8 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             _pollTimer.Stop();
             SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+            SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+            _restartTimer.Dispose();
             _ui.Dispose();
             _pollTimer.Dispose();
             _window?.Dispose();

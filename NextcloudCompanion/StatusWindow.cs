@@ -16,6 +16,10 @@ internal sealed class StatusWindow : Form, IDpiTracked
     private readonly Panel _body;
     private bool _allowDeactivateClose;
     private ClientStatus? _shown;
+    private FlowLayoutPanel? _stack;
+    private int _fitInner, _fitPad;
+    private Rectangle _fitWorkArea;
+    private bool _refitQueued;
 
     /// <summary>
     /// When true (tray mode), the X button hides the flyout so the process stays alive.
@@ -30,6 +34,7 @@ internal sealed class StatusWindow : Form, IDpiTracked
         StartPosition = FormStartPosition.Manual;
         TopMost = true;
         AutoScaleMode = AutoScaleMode.None;
+        Icon = AppIcon.Get(32);
         Font = new Font("Segoe UI", 9f, FontStyle.Regular, GraphicsUnit.Point);
         MaximizeBox = false;
         MinimizeBox = false;
@@ -71,6 +76,7 @@ internal sealed class StatusWindow : Form, IDpiTracked
     {
         base.OnHandleCreated(e);
         _trackedDpi = Dpi.OfWindow(this);
+        AppIcon.ApplyTo(this, _trackedDpi);
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -97,6 +103,7 @@ internal sealed class StatusWindow : Form, IDpiTracked
     {
         base.OnDpiChanged(e);
         _trackedDpi = e.DeviceDpiNew > 0 ? e.DeviceDpiNew : Dpi.OfWindow(this);
+        AppIcon.ApplyTo(this, _trackedDpi);
         if (_shown is null)
             return;
         // WinForms rescales the fonts of existing children after this handler returns, so
@@ -188,13 +195,54 @@ internal sealed class StatusWindow : Form, IDpiTracked
         _body.ResumeLayout(true);
         stack.PerformLayout();
 
+        _stack = stack;
+        _fitInner = innerWidth;
+        _fitPad = pad;
+        _fitWorkArea = wa;
+        FitToContent(dpi);
+    }
+
+    /// <summary>Sizes the window to the laid-out cards (re-run once child handles exist, see QueueRefit).</summary>
+    private void FitToContent(int dpi)
+    {
+        if (_stack is null)
+            return;
+        var wa = _fitWorkArea;
+        int pad = _fitPad;
+        _stack.PerformLayout();
         int chrome = IsHandleCreated ? Math.Max(0, Height - ClientSize.Height) : Dpi.Px(dpi, 32);
         int maxClient = Math.Max(Font.Height * 10, wa.Height * 3 / 4 - chrome);
-        int contentHeight = Math.Max(stack.PreferredSize.Height, Font.Height * 5);
+        int contentHeight = Math.Max(_stack.PreferredSize.Height, Font.Height * 5);
         int clientH = Math.Clamp(contentHeight + pad * 2, Font.Height * 9, maxClient);
-        ClientSize = new Size(innerWidth + pad * 2, clientH);
-        MinimumSize = new Size(Math.Min(innerWidth + pad * 2, wa.Width), Math.Min(Font.Height * 8, wa.Height));
+        ClientSize = new Size(_fitInner + pad * 2, clientH);
+        MinimumSize = new Size(Math.Min(_fitInner + pad * 2, wa.Width), Math.Min(Font.Height * 8, wa.Height));
         _body.AutoScroll = contentHeight + pad * 2 > clientH;
+    }
+
+    /// <summary>
+    /// WinForms rescales a child's own font when its handle is created on a monitor whose DPI differs
+    /// from the process's initial DPI, which happens after Rebuild measured everything. Bold lines
+    /// therefore put their font back in HandleCreated, and the window is fitted again afterwards.
+    /// </summary>
+    private void QueueRefit()
+    {
+        if (_refitQueued || !IsHandleCreated || IsDisposed)
+            return;
+        _refitQueued = true;
+        BeginInvoke(() =>
+        {
+            _refitQueued = false;
+            if (IsDisposed || _stack is null)
+                return;
+            FitToContent(Dpi.Of(this));
+            PositionNear(new Point(Left + Math.Max(1, Width / 2), Top + Math.Max(1, Height / 2)));
+        });
+    }
+
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        QueueRefit();
     }
 
     private Control Header(ClientStatus status, int width)
@@ -303,15 +351,28 @@ internal sealed class StatusWindow : Form, IDpiTracked
         return card;
     }
 
-    private Label Line(string text, int width, bool bold = false, Color? color = null) => new()
+    private Label Line(string text, int width, bool bold = false, Color? color = null)
     {
-        Text = text,
-        Font = bold ? new Font(Font, FontStyle.Bold) : Font,
-        AutoSize = true,
-        MaximumSize = new Size(Math.Max(1, width), 0),
-        ForeColor = color ?? ForeColor,
-        Margin = new Padding(0, 0, 0, 1)
-    };
+        // Regular lines inherit the form font (already final). Only bold ones need a font of their own.
+        var label = new Label
+        {
+            Text = text,
+            AutoSize = true,
+            MaximumSize = new Size(Math.Max(1, width), 0),
+            ForeColor = color ?? ForeColor,
+            Margin = new Padding(0, 0, 0, 1)
+        };
+        if (bold)
+        {
+            label.Font = new Font(Font, FontStyle.Bold);
+            label.HandleCreated += (_, _) =>
+            {
+                label.Font = new Font(Font, FontStyle.Bold);
+                QueueRefit();
+            };
+        }
+        return label;
+    }
 
     private Label Muted(string text, int width) => new()
     {

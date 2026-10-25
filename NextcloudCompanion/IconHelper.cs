@@ -28,7 +28,7 @@ public static class IconHelper
             _                   => ColourUnknown
         };
 
-        int size = IconPixelSize(dpi ?? Dpi.System);
+        int size = IconPixelSize(dpi ?? Dpi.Primary());
         float k = size / 32f;
 
         using var bmp = new Bitmap(size, size, System.Drawing.Imaging.PixelFormat.Format32bppArgb);

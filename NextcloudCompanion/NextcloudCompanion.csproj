@@ -9,9 +9,9 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>NextcloudCompanion</AssemblyName>
     <RootNamespace>NextcloudCompanion</RootNamespace>
-    <Version>1.0.10</Version>
-    <AssemblyVersion>1.0.10.0</AssemblyVersion>
-    <FileVersion>1.0.10.0</FileVersion>
+    <Version>1.0.11</Version>
+    <AssemblyVersion>1.0.11.0</AssemblyVersion>
+    <FileVersion>1.0.11.0</FileVersion>
     <Product>Nextcloud Companion</Product>
     <AssemblyTitle>Nextcloud Companion</AssemblyTitle>
     <Description>System tray companion for Nextcloud desktop: status, search, and full paths</Description>
@@ -23,6 +23,11 @@
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Also embedded as a resource: window title bars pick the right size from it at runtime (AppIcon.cs). -->
+    <EmbeddedResource Include="app.ico" LogicalName="app.ico" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.11" />

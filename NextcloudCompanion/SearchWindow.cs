@@ -195,6 +195,8 @@ internal sealed class SearchWindow : DpiForm
     {
         _placeNear = near;
         FitAndPlaceBottomRight(near);
+        if (!Visible)
+            HideUntilSettled();
         Show();
         BringToFront();
         Activate();
@@ -217,7 +219,7 @@ internal sealed class SearchWindow : DpiForm
     {
         if (Settings.RecentSearches.Count == 0)
             return;
-        if (MessageBox.Show(
+        if (Dialogs.Message(
                 $"Clear {Settings.RecentSearches.Count} previous search{(Settings.RecentSearches.Count == 1 ? "" : "es")}?",
                 Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
             return;
@@ -249,27 +251,22 @@ internal sealed class SearchWindow : DpiForm
         _query.Focus();
     }
 
-    protected override void OnDpiChanged(DpiChangedEventArgs e)
-    {
-        base.OnDpiChanged(e);
-        FitAndPlaceBottomRight(_placeNear == Point.Empty ? Cursor.Position : _placeNear);
-    }
-
     private void FitAndPlaceBottomRight(Point near)
     {
         if (near.IsEmpty)
             near = Cursor.Position;
 
         var wa = Dpi.WorkingArea(near);
-        int margin = Math.Max(8, Dpi.Px(this, 10));
+        int dpi = DpiNear(near);
+        int margin = Math.Max(8, Dpi.Px(dpi, 10));
         int maxW = Math.Max(280, wa.Width - margin * 2);
         int maxH = Math.Max(200, wa.Height - margin * 2);
 
         MinimumSize = new Size(
-            Math.Min(Dpi.Px(this, 520), maxW),
-            Math.Min(Dpi.Px(this, 280), maxH));
+            Math.Min(Dpi.Px(dpi, 520), maxW),
+            Math.Min(Dpi.Px(dpi, 280), maxH));
 
-        Size = Dpi.FitWindow(this, 900, 520, wa, margin);
+        Size = Dpi.FitWindow(dpi, 900, 520, wa, margin);
         Location = Dpi.BottomRight(Size, wa, margin);
     }
 
@@ -491,14 +488,14 @@ internal sealed class SearchWindow : DpiForm
             if (OpenOnWeb(hit, announce: true))
                 return;
 
-            MessageBox.Show(
+            Dialogs.Message(
                 "That path is not on this PC (it may be excluded from sync), and no server URL is configured.\n\n"
                 + hit.InternalPath,
                 Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Dialogs.Message(ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 
@@ -508,7 +505,7 @@ internal sealed class SearchWindow : DpiForm
         if (hit is null) return;
         if (!OpenOnWeb(hit, announce: false))
         {
-            MessageBox.Show("No server URL is configured for that account.", Text,
+            Dialogs.Message("No server URL is configured for that account.", Text,
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
     }
@@ -527,7 +524,7 @@ internal sealed class SearchWindow : DpiForm
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Dialogs.Message(ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return true;
         }
     }

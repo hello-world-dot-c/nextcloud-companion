@@ -10,7 +10,14 @@ internal interface IDpiTracked
 
 internal static class Dpi
 {
-    public static int System => (int)GetDpiForSystem();
+    /// <summary>
+    /// DPI the process started with. Stale after docking, undocking or an RDP change: only use it
+    /// as a last resort; ask for the monitor's DPI (<see cref="ForPoint"/>) instead.
+    /// </summary>
+    private static int ProcessStart => (int)GetDpiForSystem();
+
+    /// <summary>DPI of the primary monitor right now, where the taskbar and tray normally are.</summary>
+    public static int Primary() => ForPoint(new Point(0, 0));
 
     /// <summary>
     /// The DPI of the monitor the window is on right now (asked from Windows, not WinForms'
@@ -32,7 +39,7 @@ internal static class Dpi
             try { dpi = (int)GetDpiForWindow(c.Handle); }
             catch { dpi = c.DeviceDpi; }
         }
-        if (dpi <= 0) dpi = System;
+        if (dpi <= 0) dpi = Primary();
         return dpi > 0 ? dpi : 96;
     }
 
@@ -55,7 +62,7 @@ internal static class Dpi
             && GetDpiForMonitor(monitor, MdEffectiveDpi, out uint dpiX, out _) == 0
             && dpiX > 0)
             return (int)dpiX;
-        int system = System;
+        int system = ProcessStart;
         return system > 0 ? system : 96;
     }
 
@@ -69,13 +76,13 @@ internal static class Dpi
     /// Preferred outer size in design pixels, converted for this control's DPI
     /// and clamped so the window stays fully inside the working area.
     /// </summary>
-    public static Size FitWindow(Control c, int designWidth, int designHeight, Rectangle work, int margin)
+    public static Size FitWindow(int dpi, int designWidth, int designHeight, Rectangle work, int margin)
     {
         int maxW = Math.Max(280, work.Width - margin * 2);
         int maxH = Math.Max(200, work.Height - margin * 2);
         return new Size(
-            Math.Min(Px(c, designWidth), maxW),
-            Math.Min(Px(c, designHeight), maxH));
+            Math.Min(Px(dpi, designWidth), maxW),
+            Math.Min(Px(dpi, designHeight), maxH));
     }
 
     public static Point BottomRight(Size window, Rectangle work, int margin)

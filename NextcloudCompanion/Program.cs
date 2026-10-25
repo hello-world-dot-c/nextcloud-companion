@@ -24,7 +24,7 @@ internal static class Program
         Application.ThreadException += (_, e) =>
         {
             ErrorLog.Write("UI thread exception", e.Exception);
-            MessageBox.Show(e.Exception.Message, AppInfo.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Dialogs.Message(e.Exception.Message, AppInfo.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         };
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
         {
@@ -45,7 +45,20 @@ internal static class Program
             return;
         }
 
-        using var mutex = new Mutex(initiallyOwned: true, name: MutexName, out bool createdNew);
+        // A restarted instance (after a display/DPI change) waits for its predecessor to release the mutex.
+        bool restarted = args.Any(a => a.Equals("--restarted", StringComparison.OrdinalIgnoreCase));
+        var deadline = DateTime.UtcNow.AddSeconds(restarted ? 10 : 0);
+        Mutex mutex;
+        bool createdNew;
+        while (true)
+        {
+            mutex = new Mutex(initiallyOwned: true, name: MutexName, out createdNew);
+            if (createdNew || DateTime.UtcNow >= deadline)
+                break;
+            mutex.Dispose();
+            Thread.Sleep(200);
+        }
+        using var mutexHolder = mutex;
         if (!createdNew)
             return;
 
@@ -55,7 +68,7 @@ internal static class Program
         }
         catch (Exception ex)
         {
-            MessageBox.Show(
+            Dialogs.Message(
                 $"{AppInfo.Name} encountered an unhandled error and must exit.\n\n{ex.Message}",
                 AppInfo.Name,
                 MessageBoxButtons.OK,

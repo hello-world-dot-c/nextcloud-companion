@@ -27,6 +27,8 @@ internal sealed class MeetingWindow : DpiForm
     private readonly ListBox _selected;
     private readonly Label _status;
     private readonly Button _create;
+    private readonly TableLayoutPanel _root;
+    private readonly List<Label> _wrapLabels = [];
     private readonly List<AccountChoice> _accounts = [];
     private readonly List<Invitee> _invitees = [];
     private CalendarClient? _client;
@@ -47,13 +49,14 @@ internal sealed class MeetingWindow : DpiForm
         KeyPreview = true;
 
         int gap = Math.Max(6, Font.Height / 2);
-        var root = new TableLayoutPanel
+        var root = _root = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
             RowCount = 13,
             Padding = new Padding(gap * 2)
         };
+        root.SizeChanged += (_, _) => UpdateWrapWidths();
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
         for (int i = 0; i < 13; i++)
             root.RowStyles.Add(new RowStyle(i is 9 or 11 ? SizeType.Percent : SizeType.AutoSize, i is 9 or 11 ? 50f : 0f));
@@ -75,10 +78,11 @@ internal sealed class MeetingWindow : DpiForm
         _passwordState = new Label
         {
             AutoSize = true,
-            Dock = DockStyle.Fill,
+            Anchor = AnchorStyles.Left,
+            UseMnemonic = false,
             TextAlign = ContentAlignment.MiddleLeft,
             ForeColor = SystemColors.GrayText,
-            Margin = new Padding(0, 4, gap, 0)
+            Margin = new Padding(gap, 0, 0, 0)
         };
         var passwordInner = new TableLayoutPanel
         {
@@ -91,7 +95,7 @@ internal sealed class MeetingWindow : DpiForm
         passwordInner.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
         passwordInner.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         passwordInner.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        passwordInner.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40f));
+        passwordInner.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));     // status text: its natural width
         passwordInner.Controls.Add(_password, 0, 0);
         passwordInner.Controls.Add(savePassword, 1, 0);
         passwordInner.Controls.Add(forget, 2, 0);
@@ -229,11 +233,20 @@ internal sealed class MeetingWindow : DpiForm
         }
         Fit(near);
         if (!Visible)
+        {
+            HideUntilSettled();
             Show();
+        }
         BringToFront();
         Activate();
         if (_accounts.Count == 0)
             LoadAccounts();
+    }
+
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+        Fit(_placeNear);
     }
 
     protected override void OnShown(EventArgs e)
@@ -579,23 +592,48 @@ internal sealed class MeetingWindow : DpiForm
         if (near.IsEmpty)
             near = Cursor.Position;
         var wa = Dpi.WorkingArea(near);
-        int margin = Math.Max(8, Dpi.Px(this, 10));
+        int dpi = DpiNear(near);
+        int margin = Math.Max(8, Dpi.Px(dpi, 10));
         int maxW = Math.Max(360, wa.Width - margin * 2);
         int maxH = Math.Max(280, wa.Height - margin * 2);
-        MinimumSize = new Size(Math.Min(Dpi.Px(this, 640), maxW), Math.Min(Dpi.Px(this, 520), maxH));
-        Size = Dpi.FitWindow(this, 760, 720, wa, margin);
+        MinimumSize = new Size(Math.Min(Dpi.Px(dpi, 640), maxW), Math.Min(Dpi.Px(dpi, 520), maxH));
+        Size = Dpi.FitWindow(dpi, 760, 720, wa, margin);
         Location = Dpi.BottomRight(Size, wa, margin);
     }
 
-    private Label Hint(string text) => new()
+    private Label Hint(string text)
     {
-        Text = text,
-        AutoSize = true,
-        MaximumSize = new Size(640, 0),
-        Dock = DockStyle.Fill,
-        ForeColor = SystemColors.GrayText,
-        Margin = new Padding(0, 0, 0, Font.Height / 3)
-    };
+        var label = new Label
+        {
+            Text = text,
+            AutoSize = true,
+            UseMnemonic = false,          // "Devices & sessions" must not turn the '&' into an access key
+            Dock = DockStyle.Fill,
+            ForeColor = SystemColors.GrayText,
+            Margin = new Padding(0, 0, 0, Font.Height / 3)
+        };
+        _wrapLabels.Add(label);
+        LeaveMaxSizeAlone(label);         // its maximum width follows the window, see UpdateWrapWidths
+        return label;
+    }
+
+    /// <summary>Hints wrap at the width of the window (an AutoSize label only wraps if it has a maximum width).</summary>
+    private void UpdateWrapWidths()
+    {
+        int width = Math.Max(Font.Height * 10, _root.ClientSize.Width - _root.Padding.Horizontal);
+        foreach (var label in _wrapLabels)
+        {
+            int w = width - label.Margin.Horizontal;
+            if (label.MaximumSize.Width != w)
+                label.MaximumSize = new Size(w, 0);
+        }
+    }
+
+    protected override void OnDpiApplied()
+    {
+        base.OnDpiApplied();
+        UpdateWrapWidths();
+    }
 
     private Control Labeled(string caption, Control input)
     {
