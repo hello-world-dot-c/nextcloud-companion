@@ -11,9 +11,9 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/tray-menu.png" alt="Nextcloud Companion tray menu" width="240">
+  <img src="docs/images/tray-menu.png" alt="Nextcloud Companion tray menu with the hint on the title line" width="250">
   &nbsp;&nbsp;
-  <img src="docs/images/search-window.png" alt="Nextcloud Companion file search window" width="560">
+  <img src="docs/images/search-window.png" alt="Nextcloud Companion file search window, with synced and server-only results" width="560">
 </p>
 
 The official client’s tray icon often stays silent: a red X with no message, a grey icon while another account is fine, or a green check while one server is down. The Files web app also hides the full path of a file. This app reads the desktop client’s own config, logs, and sync journals and shows that state directly. It does not replace the sync client.
@@ -65,7 +65,7 @@ Sources, all under the user profile:
 ## File search
 
 <p align="center">
-  <img src="docs/images/search-window.png" alt="File search window listing matches with their full Nextcloud paths and a tooltip showing a long path" width="720">
+  <img src="docs/images/search-window.png" alt="File search window listing matches from the synced folders and from the server with their full Nextcloud paths, and a tooltip showing a long path" width="720">
 </p>
 
 Search matches the file or folder name, not the whole path. It reads a copy of the sync journal (the live database stays with the desktop client). If a journal cannot be read, it falls back to the local disk.
@@ -77,6 +77,10 @@ Columns are name, Nextcloud path, type, last change, and account. Click a header
 ## App passwords
 
 **App passwords…** in the tray menu is where the app passwords are managed, one per account: pick the account, paste an [app password](https://docs.nextcloud.com/server/latest/user_manual/en/session_management.html#managing-devices) (create it in Nextcloud under Settings → Security → Devices & sessions), **Save password**, or **Forget**. The desktop client’s login token is not reused.
+
+<p align="center">
+  <img src="docs/images/app-passwords.png" alt="App passwords window: account, password field, Save password and Forget" width="520">
+</p>
 
 Passwords are stored with Windows DPAPI for the current user in `%AppData%\NextcloudCompanion\settings.json`. The file holds the encrypted blob, not the password text, and a saved password is never shown again.
 
@@ -142,7 +146,7 @@ Output: `artifacts\installer\NextcloudCompanion-Setup-<version>.exe`. The same t
 | `installer/NextcloudCompanion.iss` | Inno Setup script |
 | `build-installer.ps1`, `build-installer.cmd` | Publish, then compile the installer |
 | `NextcloudCompanion/app.ico`, `tools/make-icon.py` | Program icon and the script that generates it |
-| `docs/images/` | Logo and screenshots used in this README (the search screenshot uses made-up data) |
+| `docs/images/` | Logo and screenshots used in this README (the search and app password screenshots use made-up data) |
 
 Companion errors are appended to `%AppData%\NextcloudCompanion\error.log`.
 
