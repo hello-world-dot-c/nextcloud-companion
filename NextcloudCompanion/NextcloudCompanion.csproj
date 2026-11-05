@@ -9,9 +9,9 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>NextcloudCompanion</AssemblyName>
     <RootNamespace>NextcloudCompanion</RootNamespace>
-    <Version>1.0.11</Version>
-    <AssemblyVersion>1.0.11.0</AssemblyVersion>
-    <FileVersion>1.0.11.0</FileVersion>
+    <Version>1.1.0</Version>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
     <Product>Nextcloud Companion</Product>
     <AssemblyTitle>Nextcloud Companion</AssemblyTitle>
     <Description>System tray companion for Nextcloud desktop: status, search, and full paths</Description>

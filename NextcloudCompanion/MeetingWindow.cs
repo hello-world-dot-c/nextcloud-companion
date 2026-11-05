@@ -10,9 +10,8 @@ namespace NextcloudCompanion;
 internal sealed class MeetingWindow : DpiForm
 {
     private readonly Func<IReadOnlyList<FolderStatus>> _folders;
+    private readonly Action? _openAppPasswords;
     private readonly ComboBox _account;
-    private readonly Panel _passwordRow;
-    private readonly TextBox _password;
     private readonly Label _passwordState;
     private readonly ComboBox _calendar;
     private readonly TextBox _title;
@@ -32,14 +31,17 @@ internal sealed class MeetingWindow : DpiForm
     private readonly List<AccountChoice> _accounts = [];
     private readonly List<Invitee> _invitees = [];
     private CalendarClient? _client;
+    private string? _attempt;      // account + app password the calendars were last loaded (or tried) with
     private string _organizerName = "";
     private string _organizerEmail = "";
     private CancellationTokenSource? _cts;
     private Point _placeNear = Cursor.Position;
 
-    public MeetingWindow(Func<IReadOnlyList<FolderStatus>> folders)
+    /// <param name="openAppPasswords">Opens the window where the app passwords are managed.</param>
+    public MeetingWindow(Func<IReadOnlyList<FolderStatus>> folders, Action? openAppPasswords = null)
     {
         _folders = folders;
+        _openAppPasswords = openAppPasswords;
         Text = "New Nextcloud meeting";
         FormBorderStyle = FormBorderStyle.Sizable;
         StartPosition = FormStartPosition.Manual;
@@ -64,17 +66,7 @@ internal sealed class MeetingWindow : DpiForm
         root.Controls.Add(Hint("Puts the meeting on a calendar you can write, including ones shared with you. People are looked up through sharing search, not the calendar app's attendee box."), 0, 0);
         root.Controls.Add(Labeled("Account", _account = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList }), 0, 1);
 
-        _password = new TextBox { Dock = DockStyle.Fill, UseSystemPasswordChar = true };
-        _password.KeyDown += async (_, e) =>
-        {
-            if (e.KeyCode != Keys.Enter) return;
-            e.SuppressKeyPress = true;
-            await SavePasswordAsync();
-        };
-        var savePassword = SmallButton("Save password");
-        savePassword.Click += async (_, _) => await SavePasswordAsync();
-        var forget = SmallButton("Forget");
-        forget.Click += (_, _) => ForgetPassword();
+        // App passwords are managed in their own window (tray menu); this row only shows the state for the account.
         _passwordState = new Label
         {
             AutoSize = true,
@@ -82,36 +74,24 @@ internal sealed class MeetingWindow : DpiForm
             UseMnemonic = false,
             TextAlign = ContentAlignment.MiddleLeft,
             ForeColor = SystemColors.GrayText,
-            Margin = new Padding(gap, 0, 0, 0)
+            Margin = new Padding(0, 0, gap, 0)
         };
-        var passwordInner = new TableLayoutPanel
+        var appPasswords = SmallButton("App passwords…");
+        appPasswords.Margin = new Padding(0);
+        appPasswords.Click += (_, _) => _openAppPasswords?.Invoke();
+        var passwordRow = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
             AutoSize = true,
-            ColumnCount = 4,
+            ColumnCount = 2,
             RowCount = 1,
-            Margin = new Padding(0, gap, 0, 0)
+            Margin = new Padding(0, gap, 0, gap)
         };
-        passwordInner.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        passwordInner.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        passwordInner.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        passwordInner.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));     // status text: its natural width
-        passwordInner.Controls.Add(_password, 0, 0);
-        passwordInner.Controls.Add(savePassword, 1, 0);
-        passwordInner.Controls.Add(forget, 2, 0);
-        passwordInner.Controls.Add(_passwordState, 3, 0);
-        _passwordRow = new Panel
-        {
-            Dock = DockStyle.Top,
-            AutoSize = true,
-            MinimumSize = new Size(0, Font.Height + 8),
-            Margin = new Padding(0, 0, 0, gap)
-        };
-        _passwordRow.Controls.Add(passwordInner);
-        var passwordBlock = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 2 };
-        passwordBlock.Controls.Add(Hint("App password from Nextcloud → Settings → Security → Devices & sessions. It is stored encrypted for your Windows user."), 0, 0);
-        passwordBlock.Controls.Add(_passwordRow, 0, 1);
-        root.Controls.Add(passwordBlock, 0, 2);
+        passwordRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));     // state text: its natural width, never wrapped
+        passwordRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        passwordRow.Controls.Add(_passwordState, 0, 0);
+        passwordRow.Controls.Add(appPasswords, 1, 0);
+        root.Controls.Add(passwordRow, 0, 2);
 
         _calendar = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
         var reload = SmallButton("Reload");
@@ -296,43 +276,51 @@ internal sealed class MeetingWindow : DpiForm
 
     private async Task OnAccountChangedAsync()
     {
-        _password.Text = "";
         bool saved = Current() is { } account && Settings.GetAppPassword(account.Folder.ServerUrl, account.Folder.DavUser) is not null;
-        _passwordState.Text = saved ? "Password saved" : "No password saved yet";
+        _passwordState.Text = saved ? "App password saved" : "No app password for this account yet";
         _calendar.Items.Clear();
         if (saved)
-            await LoadCalendarsAsync();
-        else
-            _status.Text = "Paste an app password for this account, then Save password.";
-    }
-
-    private async Task SavePasswordAsync()
-    {
-        var account = Current();
-        if (account is null)
-            return;
-        if (_password.Text.Length == 0)
         {
-            _status.Text = "Paste the app password first.";
+            await LoadCalendarsAsync();
             return;
         }
-        Settings.SetAppPassword(account.Folder.ServerUrl, account.Folder.DavUser, _password.Text);
-        _password.Text = "";
-        _passwordState.Text = "Password saved";
-        await LoadCalendarsAsync();
-    }
-
-    private void ForgetPassword()
-    {
-        var account = Current();
-        if (account is null)
-            return;
-        Settings.ClearAppPassword(account.Folder.ServerUrl, account.Folder.DavUser);
-        _passwordState.Text = "No password saved yet";
-        _calendar.Items.Clear();
         _client?.Dispose();
         _client = null;
-        _status.Text = "App password forgotten for this account.";
+        _attempt = null;
+        _status.Text = "Add an app password for this account under App passwords…, then come back to this window.";
+    }
+
+    /// <summary>
+    /// The app passwords are managed in another window: when this one is activated again, pick up a password that
+    /// was added, changed or forgotten for the selected account in the meantime.
+    /// </summary>
+    protected override void OnActivated(EventArgs e)
+    {
+        base.OnActivated(e);
+        _ = RefreshAppPasswordAsync();
+    }
+
+    private async Task RefreshAppPasswordAsync()
+    {
+        if (Current() is not { } account || IsDisposed)
+            return;
+        string? password = Settings.GetAppPassword(account.Folder.ServerUrl, account.Folder.DavUser);
+        _passwordState.Text = password is null ? "No app password for this account yet" : "App password saved";
+        string attempt = Settings.AccountKey(account.Folder.ServerUrl, account.Folder.DavUser) + "\n" + password;
+        if (password is null)
+        {
+            if (_client is not null || _attempt is not null)
+            {
+                _client?.Dispose();
+                _client = null;
+                _attempt = null;
+                _calendar.Items.Clear();
+                _status.Text = "No app password for this account. Add one under App passwords….";
+            }
+            return;
+        }
+        if (_attempt != attempt)
+            await LoadCalendarsAsync();
     }
 
     private async Task LoadCalendarsAsync()
@@ -343,9 +331,10 @@ internal sealed class MeetingWindow : DpiForm
         string? password = Settings.GetAppPassword(account.Folder.ServerUrl, account.Folder.DavUser);
         if (string.IsNullOrEmpty(password))
         {
-            _status.Text = "Save an app password for this account first.";
+            _status.Text = "Add an app password for this account first (App passwords…).";
             return;
         }
+        _attempt = Settings.AccountKey(account.Folder.ServerUrl, account.Folder.DavUser) + "\n" + password;
 
         _cts?.Cancel();
         _cts = new CancellationTokenSource();
@@ -580,7 +569,7 @@ internal sealed class MeetingWindow : DpiForm
     {
         if (_client is not null)
             return true;
-        _status.Text = "Save an app password and wait for the calendars to load.";
+        _status.Text = "Add an app password (App passwords…) and wait for the calendars to load.";
         return false;
     }
 
@@ -670,12 +659,4 @@ internal sealed class MeetingWindow : DpiForm
         Margin = new Padding(0, 0, 4, 0),
         Width = width
     };
-
-    private sealed class AccountChoice(FolderStatus folder)
-    {
-        public FolderStatus Folder { get; } = folder;
-        public override string ToString() => string.IsNullOrEmpty(Folder.DavUser)
-            ? Folder.ServerHost
-            : Folder.DavUser + "  @  " + Folder.ServerHost;
-    }
 }

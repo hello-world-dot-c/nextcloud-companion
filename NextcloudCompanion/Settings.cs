@@ -21,6 +21,8 @@ public static class Settings
 
     public static bool NotifyOnError { get; set; } = true;
     public static bool StartWithWindows { get; set; }
+    /// <summary>File search also asks the server (files that are not in a synced folder).</summary>
+    public static bool SearchServer { get; set; } = true;
     public static IReadOnlyList<string> RecentSearches => Recent;
 
     static Settings() => Load();
@@ -29,6 +31,7 @@ public static class Settings
     {
         public bool NotifyOnError { get; set; } = true;
         public bool StartWithWindows { get; set; }
+        public bool SearchServer { get; set; } = true;
         public List<string> RecentSearches { get; set; } = [];
         public Dictionary<string, string> AppPasswords { get; set; } = new();
     }
@@ -42,6 +45,7 @@ public static class Settings
             if (data is null) return;
             NotifyOnError = data.NotifyOnError;
             StartWithWindows = data.StartWithWindows;
+            SearchServer = data.SearchServer;
             Recent.Clear();
             Recent.AddRange(data.RecentSearches.Where(s => !string.IsNullOrWhiteSpace(s)).Take(MaxRecentSearches));
             Passwords.Clear();
@@ -66,6 +70,7 @@ public static class Settings
             {
                 NotifyOnError = NotifyOnError,
                 StartWithWindows = StartWithWindows,
+                SearchServer = SearchServer,
                 RecentSearches = Recent.Take(MaxRecentSearches).ToList(),
                 AppPasswords = new Dictionary<string, string>(Passwords)
             };

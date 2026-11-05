@@ -31,6 +31,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private StatusWindow? _window;
     private SearchWindow? _searchWindow;
     private MeetingWindow? _meetingWindow;
+    private AppPasswordsWindow? _appPasswordsWindow;
     private Icon? _currentIcon;
     private Health _lastHealth = Health.Unknown;
     private string _lastSummary = "";
@@ -71,6 +72,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             new ToolStripMenuItem("Show status", null, (_, _) => ShowFlyout()),
             new ToolStripMenuItem("Search files…", null, (_, _) => ShowSearch()),
             new ToolStripMenuItem("New meeting…", null, (_, _) => ShowMeeting()),
+            new ToolStripMenuItem("App passwords…", null, (_, _) => ShowAppPasswords()),
             new ToolStripMenuItem("Open Nextcloud", null, OnOpenNextcloud),
             new ToolStripMenuItem("Open log folder", null, OnOpenLogs),
             new ToolStripMenuItem("Copy latest error", null, OnCopyError),
@@ -294,12 +296,31 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
+    private void ShowAppPasswords()
+    {
+        try
+        {
+            if (_appPasswordsWindow is null || _appPasswordsWindow.IsDisposed)
+                _appPasswordsWindow = new AppPasswordsWindow(() => _monitor.Snapshot.Folders);
+            _appPasswordsWindow.ShowNear(Cursor.Position);
+        }
+        catch (Exception ex)
+        {
+            ErrorLog.Write("Show app passwords failed", ex);
+            Dialogs.Message(
+                "Could not open the app passwords window.\n\n" + ex.Message,
+                AppInfo.Name,
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+        }
+    }
+
     private void ShowMeeting()
     {
         try
         {
             if (_meetingWindow is null || _meetingWindow.IsDisposed)
-                _meetingWindow = new MeetingWindow(() => _monitor.Snapshot.Folders);
+                _meetingWindow = new MeetingWindow(() => _monitor.Snapshot.Folders, ShowAppPasswords);
             _meetingWindow.ShowNear(Cursor.Position);
         }
         catch (Exception ex)
@@ -420,6 +441,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             _window?.Dispose();
             _searchWindow?.Dispose();
             _meetingWindow?.Dispose();
+            _appPasswordsWindow?.Dispose();
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
             _menu.Dispose();

@@ -31,7 +31,8 @@ The installer is not code-signed, so Windows SmartScreen may warn the first time
 - **Tray status.** A badge for every synced folder: green check, grey dash, or red X. The tooltip and the menu’s first line say which folder or server is in trouble.
 - **Status flyout.** Click the icon, or choose **Show status**, for each folder’s account, path, last sync, and the latest error.
 - **Notifications.** A balloon when overall health becomes an error or a disconnect, or when that summary changes. Already-down servers do not notify on startup. Toggle with **Notify when a new error appears**.
-- **File search.** Find a file or folder by part of its name and see the full Nextcloud path (the part the web UI omits). Results can be opened locally or in the Files app. Up to 100 recent queries are kept.
+- **File search.** Find a file or folder by part of its name and see the full Nextcloud path (the part the web UI omits). Results can be opened locally or in the Files app. By default it also searches the whole server for files that are not in a synced folder (see below). Up to 100 recent queries are kept.
+- **App passwords.** One place (menu: **App passwords…**) to save the app password of each account. They are used for the meeting form and for searching the server.
 - **New meeting.** Create an event on a calendar you can write, including internal people and groups. This avoids the Calendar app’s attendee search, which does not reliably find internal users or groups.
 - **Copy latest error**, **Open Nextcloud**, **Open log folder**, and **Start with Windows**.
 
@@ -69,13 +70,19 @@ Sources, all under the user profile:
 
 Search matches the file or folder name, not the whole path. It reads a copy of the sync journal (the live database stays with the desktop client). If a journal cannot be read, it falls back to the local disk.
 
+**Server search.** With **Also search the server** ticked (the default), the same name is also looked up on the server with WebDAV `SEARCH` over your whole account, so files and folders outside every synced folder are found too. They show up as *Remote file* / *Remote folder* and open in the Files app; hits that the journal already listed are not repeated. The server is asked only for accounts that have an [app password](#app-passwords) saved. While no account has one, the option is greyed out. An account without one is skipped and named in the status line, an account whose app password is rejected is reported, and nothing is ever prompted for. At most 200 results per account are returned, so refine the name if the status line says the list may be cut off. The command-line `--search` stays local.
+
 Columns are name, Nextcloud path, type, last change, and account. Click a header to sort. A truncated row’s tooltip shows the full name and path. **Open location** opens a local file in Explorer, a local folder in the shell, or the Files app when the item exists only on the server.
+
+## App passwords
+
+**App passwords…** in the tray menu is where the app passwords are managed, one per account: pick the account, paste an [app password](https://docs.nextcloud.com/server/latest/user_manual/en/session_management.html#managing-devices) (create it in Nextcloud under Settings → Security → Devices & sessions), **Save password**, or **Forget**. The desktop client’s login token is not reused.
+
+Passwords are stored with Windows DPAPI for the current user in `%AppData%\NextcloudCompanion\settings.json`. The file holds the encrypted blob, not the password text, and a saved password is never shown again.
 
 ## Meetings
 
-**New meeting…** talks to the account with an [app password](https://docs.nextcloud.com/server/latest/user_manual/en/session_management.html#managing-devices) (Settings → Security → Devices & sessions). The desktop client’s login token is not reused.
-
-Passwords are stored with Windows DPAPI for the current user in `%AppData%\NextcloudCompanion\settings.json`. The file holds the encrypted blob, not the password text.
+**New meeting…** talks to the account with the app password saved under [App passwords](#app-passwords). If the account has none yet, the form says so and its **App passwords…** button opens that window; saving a password there is picked up when you return to the form.
 
 People and groups come from the Files sharing search (`sharees`) and from CardDAV, not from the Calendar attendee autocomplete. A group is expanded to its members when the server allows it; the member list is a snapshot taken when the group is added. The event is written with CalDAV.
 
@@ -129,6 +136,7 @@ Output: `artifacts\installer\NextcloudCompanion-Setup-<version>.exe`. The same t
 | `NextcloudCompanion/StatusWindow.cs` | Status flyout |
 | `NextcloudCompanion/FileSearch.cs`, `SearchWindow.cs` | Journal search and results |
 | `NextcloudCompanion/CalendarClient.cs`, `MeetingWindow.cs` | CalDAV / OCS meeting dialog |
+| `NextcloudCompanion/AppPasswordsWindow.cs`, `ServerFileSearch.cs` | App password management; server-side file search (WebDAV `SEARCH`) |
 | `NextcloudCompanion/Settings.cs`, `SecretStore.cs` | Settings and DPAPI app passwords |
 | `NextcloudCompanion/Dpi.cs`, `DpiForm.cs` | Per-monitor DPI handling: windows re-scale when the DPI or scale factor changes |
 | `installer/NextcloudCompanion.iss` | Inno Setup script |

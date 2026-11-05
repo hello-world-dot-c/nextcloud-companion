@@ -15,6 +15,11 @@ internal sealed class SearchWindow : DpiForm
     private readonly ComboBox _query;
     private readonly Button _clearHistory;
     private readonly Button _searchButton;
+    private readonly CheckBox _includeServer;
+    private readonly ToolTip _serverTip = new();
+    private bool _syncingServerOption;
+    private string _statusBase = "";          // status text of the local part; the server part appends to it
+    private readonly ToolTip _statusTip = new();   // full status text when the footer line is too short for it
     private readonly ListView _results;
     private readonly Label _status;
     private readonly Button _copyInternal;
@@ -64,13 +69,14 @@ internal sealed class SearchWindow : DpiForm
 
         var searchRow = new TableLayoutPanel
         {
-            ColumnCount = 3,
+            ColumnCount = 4,
             RowCount = 1,
             AutoSize = true,
             Dock = DockStyle.Fill,
             Margin = new Padding(0, 0, 0, gap)
         };
         searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         searchRow.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -99,9 +105,29 @@ internal sealed class SearchWindow : DpiForm
         _clearHistory = ActionButton("Clear history");
         _clearHistory.Click += (_, _) => ClearHistory();
 
+        _includeServer = new CheckBox
+        {
+            Text = "Also search the server(s)",
+            AutoSize = true,
+            UseMnemonic = false,
+            Checked = Settings.SearchServer,
+            Anchor = AnchorStyles.Left,
+            Margin = new Padding(0, 0, gap, 0)
+        };
+        _includeServer.CheckedChanged += (_, _) =>
+        {
+            if (_syncingServerOption)
+                return;
+            Settings.SearchServer = _includeServer.Checked;
+            Settings.Save();
+        };
+        _serverTip.SetToolTip(_includeServer,
+            "Also finds files that are not in a synced folder, on every account that has an app password (tray menu: App passwords…).");
+
         searchRow.Controls.Add(_query, 0, 0);
-        searchRow.Controls.Add(_searchButton, 1, 0);
-        searchRow.Controls.Add(_clearHistory, 2, 0);
+        searchRow.Controls.Add(_includeServer, 1, 0);
+        searchRow.Controls.Add(_searchButton, 2, 0);
+        searchRow.Controls.Add(_clearHistory, 3, 0);
         ReloadHistory();
 
         _results = new ListView
@@ -194,6 +220,7 @@ internal sealed class SearchWindow : DpiForm
     public void ShowNear(Point near)
     {
         _placeNear = near;
+        RefreshServerOption();
         FitAndPlaceBottomRight(near);
         if (!Visible)
             HideUntilSettled();
@@ -201,6 +228,33 @@ internal sealed class SearchWindow : DpiForm
         BringToFront();
         Activate();
         _query.Focus();
+    }
+
+    /// <summary>
+    /// Searching the server needs an app password, so the option is greyed out (and shown unticked, without touching the
+    /// saved preference) while no account has one. Checked again whenever the window is activated, because the
+    /// passwords are managed in another window.
+    /// </summary>
+    private void RefreshServerOption()
+    {
+        bool any = AccountChoice.From(_folders() ?? [])
+            .Any(a => ServerFileSearch.PasswordFor(a.Folder.ServerUrl, a.Folder.DavUser) is not null);
+        _syncingServerOption = true;
+        try
+        {
+            _includeServer.Enabled = any;
+            _includeServer.Checked = any && Settings.SearchServer;
+        }
+        finally
+        {
+            _syncingServerOption = false;
+        }
+    }
+
+    protected override void OnActivated(EventArgs e)
+    {
+        base.OnActivated(e);
+        RefreshServerOption();
     }
 
     private void ReloadHistory()
@@ -362,8 +416,11 @@ internal sealed class SearchWindow : DpiForm
         _cts = new CancellationTokenSource();
         var token = _cts.Token;
         var folders = _folders() ?? [];
+        RefreshServerOption();
+        bool askServer = _includeServer.Enabled && _includeServer.Checked;
 
         _searchButton.Enabled = false;
+        _statusBase = "";
         _status.Text = "Searching…";
         _results.BeginUpdate();
         _results.Items.Clear();
@@ -375,8 +432,16 @@ internal sealed class SearchWindow : DpiForm
             {
                 var sw = Stopwatch.StartNew();
                 var hits = FileSearch.Find(folders, q, FileSearch.DefaultLimit, token);
-                sw.Stop();
-                PostUi(() => ShowHits(hits, sw.Elapsed, q));
+                var localElapsed = sw.Elapsed;
+                PostUi(() => ShowHits(hits, localElapsed, q, serverPending: askServer));
+
+                if (askServer)
+                {
+                    var known = hits.Select(ServerFileSearch.Key).ToHashSet(StringComparer.Ordinal);
+                    var server = ServerFileSearch.SearchAsync(folders, q, known, cancellationToken: token).GetAwaiter().GetResult();
+                    var totalElapsed = sw.Elapsed;
+                    PostUi(() => AddServerHits(server, totalElapsed, token));
+                }
             }
             catch (OperationCanceledException)
             {
@@ -401,38 +466,80 @@ internal sealed class SearchWindow : DpiForm
         catch (ObjectDisposedException) { /* closed while searching */ }
     }
 
-    private void ShowHits(IReadOnlyList<FileHit> hits, TimeSpan elapsed, string query)
+    private static ListViewItem MakeItem(FileHit hit)
+    {
+        var item = new ListViewItem(hit.Name)
+        {
+            Tag = hit,
+            ImageIndex = -1
+        };
+        item.SubItems.Add(hit.InternalPath);
+        item.SubItems.Add(hit.KindLabel);
+        item.SubItems.Add(hit.ModifiedLabel);
+        item.SubItems.Add(hit.Account);
+        item.ToolTipText = string.IsNullOrEmpty(hit.ModifiedLabel)
+            ? hit.Name + Environment.NewLine + hit.InternalPath
+            : hit.Name + Environment.NewLine + hit.InternalPath + Environment.NewLine + hit.ModifiedLabel;
+        return item;
+    }
+
+    private void ShowHits(IReadOnlyList<FileHit> hits, TimeSpan elapsed, string query, bool serverPending = false)
     {
         if (IsDisposed) return;
-        _searchButton.Enabled = true;
+        // With a server search to follow, the button stays disabled until that has finished too.
+        _searchButton.Enabled = !serverPending;
+        _statusTip.SetToolTip(_status, "");
         _results.BeginUpdate();
         _results.Items.Clear();
         foreach (var hit in hits)
-        {
-            var item = new ListViewItem(hit.Name)
-            {
-                Tag = hit,
-                ImageIndex = -1
-            };
-            item.SubItems.Add(hit.InternalPath);
-            item.SubItems.Add(hit.KindLabel);
-            item.SubItems.Add(hit.ModifiedLabel);
-            item.SubItems.Add(hit.Account);
-            item.ToolTipText = string.IsNullOrEmpty(hit.ModifiedLabel)
-                ? hit.Name + Environment.NewLine + hit.InternalPath
-                : hit.Name + Environment.NewLine + hit.InternalPath + Environment.NewLine + hit.ModifiedLabel;
-            _results.Items.Add(item);
-        }
+            _results.Items.Add(MakeItem(hit));
         _results.EndUpdate();
         FitColumns();
         if (_sortColumn >= 0)
             ApplySort();
 
-        _status.Text = hits.Count == 0
-            ? $"No files or folders named like “{query}”."
+        _statusBase = hits.Count == 0
+            ? $"No synced files or folders named like “{query}”."
             : hits.Count >= FileSearch.DefaultLimit
                 ? $"Showing the first {hits.Count} matches in {elapsed.TotalSeconds:0.0}s. Refine the name to narrow it down."
                 : $"{hits.Count} match{(hits.Count == 1 ? "" : "es")} in {elapsed.TotalSeconds:0.0}s.";
+        _status.Text = serverPending ? _statusBase + " Searching the server…" : _statusBase;
+        if (!serverPending && hits.Count == 0)
+            _status.Text = $"No files or folders named like “{query}”.";
+        if (!serverPending && !_includeServer.Enabled)
+            _status.Text += " The server was not searched: no app password saved (tray menu: App passwords…).";
+    }
+
+    /// <summary>Appends what the server found beyond the synced folders and reports the outcome in the status line.</summary>
+    private void AddServerHits(ServerSearchResult server, TimeSpan elapsed, CancellationToken token)
+    {
+        if (IsDisposed || token.IsCancellationRequested) return;
+        _searchButton.Enabled = true;
+
+        if (server.Hits.Count > 0)
+        {
+            _results.BeginUpdate();
+            foreach (var hit in server.Hits)
+                _results.Items.Add(MakeItem(hit));
+            _results.EndUpdate();
+            FitColumns();
+            if (_sortColumn >= 0)
+                ApplySort();
+        }
+
+        int total = _results.Items.Count;
+        string text = total == 0
+            ? $"No files or folders named like “{_query.Text.Trim()}”."
+            : $"{total} match{(total == 1 ? "" : "es")} in {elapsed.TotalSeconds:0.0}s"
+              + (server.Hits.Count > 0 ? $" ({server.Hits.Count} found on the server)." : ".");
+        if (server.Truncated)
+            text += " The server list may be cut off: refine the name.";
+        if (server.Failed.Count > 0)
+            text += " Server search failed for " + string.Join("; ", server.Failed) + ".";
+        if (server.NoPassword.Count > 0)
+            text += " Server not searched for " + string.Join(", ", server.NoPassword) + " (add one under App passwords…).";
+        _status.Text = text;
+        _statusTip.SetToolTip(_status, text);
     }
 
     private IEnumerable<FileHit> SelectedHits()
@@ -444,9 +551,14 @@ internal sealed class SearchWindow : DpiForm
     {
         var paths = SelectedHits()
             .Select(h => internalPath ? h.InternalPath : h.LocalPath)
+            .Where(p => p.Length > 0)
             .ToList();
         if (paths.Count == 0)
+        {
+            if (!internalPath && SelectedHits().Any())
+                _status.Text = "Not synced to this PC: there is no local path.";
             return;
+        }
         try { Clipboard.SetText(string.Join(Environment.NewLine, paths)); }
         catch { /* clipboard busy */ }
         _status.Text = paths.Count == 1 ? "Copied." : $"Copied {paths.Count} paths.";
