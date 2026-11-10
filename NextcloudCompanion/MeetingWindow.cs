@@ -19,6 +19,7 @@ internal sealed class MeetingWindow : DpiForm
     private readonly DateTimePicker _startTime;
     private readonly DateTimePicker _endDate;
     private readonly DateTimePicker _endTime;
+    private readonly ComboBox _reminder;
     private readonly TextBox _location;
     private readonly TextBox _description;
     private readonly TextBox _personQuery;
@@ -107,20 +108,49 @@ internal sealed class MeetingWindow : DpiForm
         root.Controls.Add(Labeled("Title", _title), 0, 4);
 
         var start = DateTime.Today.AddHours(DateTime.Now.Hour + 1);
-        _startDate = DatePicker(start, DateTimePickerFormat.Short, Font.Height * 8);
-        _startTime = DatePicker(start, DateTimePickerFormat.Time, Font.Height * 6);
-        _endDate = DatePicker(start.AddHours(1), DateTimePickerFormat.Short, Font.Height * 8);
-        _endTime = DatePicker(start.AddHours(1), DateTimePickerFormat.Time, Font.Height * 6);
+        _startDate = DatePicker(start, DateTimePickerFormat.Short, Font.Height * 7);
+        _startTime = DatePicker(start, DateTimePickerFormat.Time, Font.Height * 56 / 10);
+        _endDate = DatePicker(start.AddHours(1), DateTimePickerFormat.Short, Font.Height * 7);
+        _endTime = DatePicker(start.AddHours(1), DateTimePickerFormat.Time, Font.Height * 56 / 10);
+        // Choosing a start moves the end to one hour later; the end can still be set by hand afterwards.
+        _startDate.ValueChanged += (_, _) => EndOneHourAfterStart();
+        _startTime.ValueChanged += (_, _) => EndOneHourAfterStart();
         var when = new FlowLayoutPanel
         {
-            Dock = DockStyle.Fill,
+            AutoSize = true,
+            WrapContents = false,
+            FlowDirection = FlowDirection.LeftToRight,
+            Margin = new Padding(0)
+        };
+        when.Controls.AddRange([_startDate, _startTime, new Label { Text = "to", AutoSize = true, Margin = new Padding(gap, 6, gap, 0) }, _endDate, _endTime]);
+
+        // 40% narrower than before (14 text heights), but never narrower than its longest entry plus the drop-down button.
+        int longest = ReminderOptions.Max(o => TextRenderer.MeasureText(o.Label, Font).Width);
+        _reminder = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Width = Math.Max(Font.Height * 14 * 6 / 10, longest + SystemInformation.VerticalScrollBarWidth + Font.Height / 2)
+        };
+        foreach (var option in ReminderOptions)
+            _reminder.Items.Add(option);
+        _reminder.SelectedIndex = DefaultReminderIndex;
+
+        var whenRow = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
             AutoSize = true,
             WrapContents = false,
             FlowDirection = FlowDirection.LeftToRight,
             Margin = new Padding(0, gap, 0, 0)
         };
-        when.Controls.AddRange([_startDate, _startTime, new Label { Text = "to", AutoSize = true, Margin = new Padding(gap, 6, gap, 0) }, _endDate, _endTime]);
-        root.Controls.Add(Labeled("When (this PC's local time)", when), 0, 5);
+        var whenBox = Labeled("When (this PC's local time)", when);
+        whenBox.Dock = DockStyle.None;
+        whenBox.Margin = new Padding(0, 0, gap * 2, 0);
+        var reminderBox = Labeled("Reminder", _reminder);
+        reminderBox.Dock = DockStyle.None;
+        reminderBox.Margin = new Padding(0);
+        whenRow.Controls.AddRange([whenBox, reminderBox]);
+        root.Controls.Add(whenRow, 0, 5);
 
         _location = new TextBox { Dock = DockStyle.Fill };
         root.Controls.Add(Labeled("Location", _location), 0, 6);
@@ -548,7 +578,8 @@ internal sealed class MeetingWindow : DpiForm
                 EndLocal = end,
                 OrganizerName = _organizerName,
                 OrganizerEmail = _organizerEmail,
-                Invitees = _invitees.ToList()
+                Invitees = _invitees.ToList(),
+                ReminderMinutesBefore = (_reminder.SelectedItem as ReminderOption)?.MinutesBefore
             }, CancellationToken.None);
             _status.Text = _invitees.Count == 0
                 ? $"Created “{title}” on {calendar.Name}."
@@ -589,6 +620,35 @@ internal sealed class MeetingWindow : DpiForm
         Size = Dpi.FitWindow(dpi, 760, 720, wa, margin);
         Location = Dpi.BottomRight(Size, wa, margin);
     }
+
+    private void EndOneHourAfterStart()
+    {
+        var end = _startDate.Value.Date + _startTime.Value.TimeOfDay + TimeSpan.FromHours(1);
+        _endDate.Value = end;
+        _endTime.Value = end;
+    }
+
+    /// <summary>Reminder choices of the meeting form; the calendar app shows the reminder before the start.</summary>
+    private sealed record ReminderOption(string Label, int? MinutesBefore)
+    {
+        public override string ToString() => Label;
+    }
+
+    private static readonly ReminderOption[] ReminderOptions =
+    [
+        new("No reminder", null),
+        new("At the start", 0),
+        new("5 minutes before", 5),
+        new("10 minutes before", 10),
+        new("15 minutes before", 15),
+        new("30 minutes before", 30),
+        new("1 hour before", 60),
+        new("2 hours before", 120),
+        new("1 day before", 1440),
+        new("2 days before", 2880)
+    ];
+
+    private const int DefaultReminderIndex = 4;      // 15 minutes before
 
     private Label Hint(string text)
     {

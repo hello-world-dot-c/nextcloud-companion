@@ -26,6 +26,9 @@ internal sealed class StatusWindow : Form, IDpiTracked
     /// </summary>
     public bool HideInsteadOfClose { get; set; } = true;
 
+    /// <summary>Raised when the user asks for Nextcloud to be restarted from the flyout.</summary>
+    public Action? RestartRequested { get; set; }
+
     public StatusWindow()
     {
         Text = AppInfo.Name;
@@ -189,6 +192,23 @@ internal sealed class StatusWindow : Form, IDpiTracked
                 stack.Controls.Add(FolderCard(folder, innerWidth));
         }
 
+        if (RestartRequested is not null && status.Process is not null && !status.AmbiguousProcess && !status.Recovery.Active)
+        {
+            var restart = new Button
+            {
+                Text = "Restart Nextcloud to retry syncing…",
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0, Font.Height / 4, 0, Font.Height / 4)
+            };
+            restart.Click += (_, _) =>
+            {
+                Hide();
+                RestartRequested?.Invoke();
+            };
+            stack.Controls.Add(restart);
+        }
+
         stack.Controls.Add(Muted($"Updated {status.CheckedAt:HH:mm:ss}", innerWidth));
 
         _body.Controls.Add(stack);
@@ -281,15 +301,35 @@ internal sealed class StatusWindow : Form, IDpiTracked
         return card;
     }
 
-    private static string OverallTitle(ClientStatus status) => status.Overall switch
+    private static string OverallTitle(ClientStatus status)
     {
-        Health.Ok           => "Nextcloud is in sync",
-        Health.Error        => "Nextcloud has a sync error",
-        Health.Warning      => "Nextcloud has a warning",
-        Health.Disconnected => "A Nextcloud server is unreachable",
-        Health.Offline      => "Nextcloud client is not running",
-        _                   => "Nextcloud status"
-    };
+        if (status.Observation.State == ObservationState.ScanFailed)
+            return "Sync status unavailable";
+        if (status.ProcessRunning && status.Recovery.Phase == RecoveryPhase.Restarting)
+            return "Restarting Nextcloud";
+        if (status.ProcessRunning && status.Recovery.Phase == RecoveryPhase.WaitingForEvidence)
+            return "Nextcloud restarted";
+        if (status.ProcessRunning && status.Recovery.Phase == RecoveryPhase.Failed)
+            return "The restart did not finish";
+
+        switch (status.Overall)
+        {
+            case Health.Ok: return "Nextcloud is up to date";
+            case Health.Error: return "Nextcloud has a sync error";
+            case Health.Disconnected: return "A Nextcloud server is unreachable";
+            case Health.Offline: return "Nextcloud client is not running";
+            case Health.Paused: return "All folders are paused";
+            case Health.Warning:
+                return status.Folders.Any(f => f.Stalled) ? "Nextcloud may be stuck waiting to sync" : "Nextcloud has a warning";
+        }
+
+        var enabled = status.EnabledFolders.ToList();
+        if (status.Observation.Usable && enabled.Any(f => f.Activity is SyncActivity.Preparing or SyncActivity.Syncing))
+            return "Nextcloud is syncing";
+        if (status.Observation.Usable && enabled.Any(f => f.Activity == SyncActivity.Waiting))
+            return "Nextcloud is waiting to start syncing";
+        return "Nextcloud is running — sync status unknown";
+    }
 
     private Control FolderCard(FolderStatus folder, int width)
     {
@@ -331,16 +371,12 @@ internal sealed class StatusWindow : Form, IDpiTracked
             textWidth,
             color: SystemColors.GrayText));
 
-        string detail = folder.Health switch
-        {
-            Health.Ok => folder.LastSync is DateTime t ? "Last sync " + FolderStatus.FormatTime(t) : "OK",
-            Health.Error or Health.Warning or Health.Disconnected => folder.Headline,
-            Health.Offline => "Client not running",
-            _ => "No recent result in the log"
-        };
+        string detail = folder.Headline;
         Color detailColor = folder.Health is Health.Error or Health.Disconnected
             ? IconHelper.BadgeColor(Health.Error)
-            : SystemColors.GrayText;
+            : folder.Stalled || folder.Health == Health.Warning
+                ? IconHelper.BadgeColor(Health.Warning)
+                : SystemColors.GrayText;
         text.Controls.Add(Line(detail, textWidth, color: detailColor));
 
         bool hasError = folder.Health is Health.Error or Health.Warning && !string.IsNullOrEmpty(folder.ErrorMessage);

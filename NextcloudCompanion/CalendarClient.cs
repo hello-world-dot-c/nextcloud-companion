@@ -51,6 +51,8 @@ public sealed class MeetingDraft
     public string Description { get; init; } = "";
     public required DateTime StartLocal { get; init; }
     public required DateTime EndLocal { get; init; }
+    /// <summary>Minutes before the start at which the calendar should remind (0 = at the start), or null for no reminder.</summary>
+    public int? ReminderMinutesBefore { get; init; }
     public required string OrganizerName { get; init; }
     public required string OrganizerEmail { get; init; }
     public required IReadOnlyList<Invitee> Invitees { get; init; }
@@ -651,7 +653,7 @@ public sealed class CalendarClient : IDisposable
     private static string Xml(string value)
         => value.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
 
-    private static string BuildIcs(string uid, MeetingDraft draft)
+    internal static string BuildIcs(string uid, MeetingDraft draft)
     {
         var sb = new StringBuilder();
         void Line(string line)
@@ -693,9 +695,29 @@ public sealed class CalendarClient : IDisposable
                 parms += ";MEMBER=\"mailto:" + person.MemberOfGroupEmail + "\"";
             Line("ATTENDEE;" + parms + ":mailto:" + person.Email);
         }
+        if (draft.ReminderMinutesBefore is int reminder && reminder >= 0)
+        {
+            Line("BEGIN:VALARM");
+            Line("ACTION:DISPLAY");
+            Line("DESCRIPTION:" + IcalText(draft.Title));
+            Line("TRIGGER:" + AlarmTrigger(reminder));
+            Line("END:VALARM");
+        }
         Line("END:VEVENT");
         Line("END:VCALENDAR");
         return sb.ToString();
+    }
+
+    /// <summary>iCalendar duration relative to the start: 0 -> PT0S, 15 -> -PT15M, 120 -> -PT2H, 2880 -> -P2D.</summary>
+    internal static string AlarmTrigger(int minutesBefore)
+    {
+        if (minutesBefore <= 0)
+            return "PT0S";
+        if (minutesBefore % 1440 == 0)
+            return "-P" + minutesBefore / 1440 + "D";
+        if (minutesBefore % 60 == 0)
+            return "-PT" + minutesBefore / 60 + "H";
+        return "-PT" + minutesBefore + "M";
     }
 
     private static DateTime AsUtc(DateTime value)

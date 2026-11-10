@@ -1,527 +1,172 @@
-using System.Globalization;
-using System.IO.Compression;
-using System.Text.RegularExpressions;
-
 namespace NextcloudCompanion;
 
-/// <summary>
-/// Reads nextcloud.cfg plus recent desktop-client logs and produces a per-folder health snapshot.
-/// The Nextcloud tray icon often shows a red X with no text; the actual reason is in these logs.
-/// </summary>
-public sealed class StatusMonitor
+/// <summary>Where the monitor looks and how it tells time and finds processes. Replaceable for tests.</summary>
+public sealed class StatusMonitorOptions
 {
     private static readonly string ConfigDir =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Nextcloud");
-    private static readonly string ConfigPath = Path.Combine(ConfigDir, "nextcloud.cfg");
-    private static readonly string LogDir = Path.Combine(ConfigDir, "logs");
 
-    private static readonly Regex Timestamp = new(
-        @"^(?<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})",
-        RegexOptions.Compiled);
+    public string ConfigPath { get; init; } = Path.Combine(ConfigDir, "nextcloud.cfg");
+    public string DefaultLogDir { get; init; } = Path.Combine(ConfigDir, "logs");
+    /// <summary>The temporary diagnostic directory of the client (<c>%TEMP%\Nextcloud-logdir</c>).</summary>
+    public string TemporaryLogDir { get; init; } = Path.Combine(Path.GetTempPath(), "Nextcloud-logdir");
+    /// <summary>An explicit log directory chosen by the user, or null.</summary>
+    public Func<string?> LogDirOverride { get; init; } = () => Settings.LogDirOverride;
+    public IProcessController Processes { get; init; } = new WindowsProcessController();
+    public IClock Clock { get; init; } = SystemClock.Instance;
+    /// <summary>The logs are considered stale when their newest record is older than this.</summary>
+    public TimeSpan StaleAfter { get; init; } = TimeSpan.FromMinutes(15);
+}
 
-    private static readonly Regex SyncStarted = new(
-        @"Sync started for folder \[(?<folder>[^\]]+)\] of account \[(?<account>[^\]]+)\]",
-        RegexOptions.Compiled);
+/// <summary>
+/// Reads nextcloud.cfg plus recent desktop-client logs and produces a per-folder snapshot. It reports what the
+/// evidence shows, and says so when there is none: process, connection, activity and sync results are kept apart,
+/// and a failed scan is published as such instead of leaving an earlier healthy result on screen.
+/// </summary>
+public sealed class StatusMonitor : IStatusSource
+{
+    private readonly StatusMonitorOptions _options;
+    private readonly LogLocator _locator;
+    private readonly LogReader _reader;
 
-    private static readonly Regex SyncFinished = new(
-        @"Sync finished for folder \[(?<folder>[^\]]+)\] of account \[(?<account>[^\]]+)\]",
-        RegexOptions.Compiled);
+    public StatusMonitor() : this(new StatusMonitorOptions()) { }
 
-    private static readonly Regex PropagationError = new(
-        @"Could not complete propagation of ""(?<path>[^""]+)"".*status OCC::SyncFileItem::(?<status>\w+).*error: ""(?<msg>[^""]*)""",
-        RegexOptions.Compiled);
-
-    private static readonly Regex NotificationError = new(
-        @"Error successfully added to the notification list:.*?""(?<path>[^""]+)"" ""(?<msg>[^""]+)""",
-        RegexOptions.Compiled);
-
-    private static readonly Regex EngineResult = new(
-        @"SyncEngine finished (?<result>with ERROR|without problem)",
-        RegexOptions.Compiled);
-
-    private static readonly Regex EtagCheck = new(
-        @"Trying to check ""(?<url>[^""]+)"" for changes via ETag check\. \(time since last sync: (?<secs>\d+) s\)",
-        RegexOptions.Compiled);
-
-    private static readonly Regex EtagFinished = new(
-        @"Request Etag of QUrl\(""(?<url>[^""]+)""\) FINISHED WITH STATUS ""(?<status>[^""]+)""",
-        RegexOptions.Compiled);
-
-    // FolderMan logs this when ConnectionValidator fails (server down, DNS, refused, …).
-    private static readonly Regex AccountDisconnected = new(
-        @"Account ""(?<account>[^""]+)"" disconnected or paused",
-        RegexOptions.Compiled);
-
-    private static readonly Regex AccountConnected = new(
-        @"Account ""(?<account>[^""]+)"" connected, scheduling",
-        RegexOptions.Compiled);
-
-    private static readonly Regex CheckServerCreated = new(
-        @"OCC::CheckServerJob created for ""(?<url>[^""]+)""",
-        RegexOptions.Compiled);
-
-    private static readonly Regex StatusPhpError = new(
-        @"error: status\.php replied",
-        RegexOptions.Compiled);
+    public StatusMonitor(StatusMonitorOptions options)
+    {
+        _options = options;
+        _locator = new LogLocator(options.DefaultLogDir, options.TemporaryLogDir, () => options.Clock.Now);
+        _reader = new LogReader(() => options.Clock.Now);
+    }
 
     public ClientStatus Snapshot { get; private set; } = new() { ProcessRunning = false };
 
+    /// <summary>Scans once. Never throws: a failure becomes a snapshot that says the status is unavailable.</summary>
     public ClientStatus Scan()
     {
-        bool running = ProcessRunning();
-        var folders = ReadConfiguredFolders();
-
-        if (folders.Count == 0)
-        {
-            Snapshot = new ClientStatus
-            {
-                ProcessRunning = running,
-                Overall = running ? Health.Unknown : Health.Offline,
-                Folders = []
-            };
-            return Snapshot;
-        }
-
-        var byPath = folders.ToDictionary(f => Normalize(f.LocalPath), StringComparer.OrdinalIgnoreCase);
-        ApplyLog(byPath);
-
-        foreach (var folder in folders)
-        {
-            if (!running)
-                folder.Health = Health.Offline;
-            else if (folder.Paused && folder.Health == Health.Unknown)
-                folder.Health = Health.Ok;
-        }
-
-        Health overall;
-        if (!running)
-            overall = Health.Offline;
-        else if (folders.Any(f => f.Health == Health.Error))
-            overall = Health.Error;
-        else if (folders.Any(f => f.Health == Health.Disconnected))
-            overall = Health.Disconnected;
-        else if (folders.Any(f => f.Health == Health.Warning))
-            overall = Health.Warning;
-        else if (folders.Any(f => f.Health == Health.Ok))
-            overall = Health.Ok;
-        else
-            overall = Health.Unknown;
-
-        string? logFile = null;
         try
         {
-            logFile = Directory.Exists(LogDir)
-                ? new DirectoryInfo(LogDir).GetFiles("*nextcloud.log*")
-                    .Where(f => !f.Name.Contains("permanent_delete", StringComparison.OrdinalIgnoreCase))
-                    .OrderByDescending(f => f.LastWriteTimeUtc)
-                    .FirstOrDefault()?.FullName
-                : null;
+            Snapshot = ScanCore();
         }
-        catch { /* ignore */ }
-
-        Snapshot = new ClientStatus
+        catch (Exception ex)
         {
-            ProcessRunning = running,
-            Overall = overall,
-            Folders = folders,
-            CheckedAt = DateTime.Now,
-            LogFile = logFile
-        };
+            ErrorLog.Write("Scan failed", ex);
+            Snapshot = Failure(ex.Message);
+        }
         return Snapshot;
     }
 
-    private static bool ProcessRunning()
+    /// <summary>A snapshot that keeps the configuration of the last one but none of its observed state.</summary>
+    public ClientStatus Failure(string reason)
     {
-        try
+        var previous = Snapshot;
+        return new ClientStatus
         {
-            return System.Diagnostics.Process.GetProcessesByName("nextcloud").Length > 0;
-        }
-        catch
-        {
-            return false;
-        }
+            ProcessRunning = previous.ProcessRunning,
+            Process = previous.Process,
+            AmbiguousProcess = previous.AmbiguousProcess,
+            Folders = previous.Folders.Select(f => f.CloneConfiguration()).ToList(),
+            CheckedAt = _options.Clock.Now,
+            Observation = new Observation { State = ObservationState.ScanFailed, Reason = reason }
+        };
     }
 
-    private static List<FolderStatus> ReadConfiguredFolders()
+    private ClientStatus ScanCore()
     {
-        var result = new List<FolderStatus>();
-        if (!File.Exists(ConfigPath))
-            return result;
+        var clients = _options.Processes.FindClients();
+        bool running = clients.Count > 0;
+        var identity = clients.Count == 1 ? clients[0] : null;
 
-        string text;
-        try
+        ConfigData config = ReadConfig();
+        var folders = config.Folders;
+
+        var location = _locator.Locate(config, _options.LogDirOverride());
+        LogReadResult read = new();
+        LogAnalysis analysis = new();
+        if (location.State == ObservationState.Ok)
         {
-            text = File.ReadAllText(ConfigPath);
+            read = _reader.Read(location.Files);
+            analysis = LogAnalyzer.Apply(folders, read.Records);
         }
-        catch
+
+        foreach (var folder in folders)
         {
-            return result;
-        }
-
-        var accounts = new Dictionary<string, (string Url, string User)>(StringComparer.Ordinal);
-        var folderAcc = new Dictionary<(string Acc, string Id), FolderDraft>();
-
-        foreach (var raw in text.Split('\n'))
-        {
-            var line = raw.Trim();
-            if (line.Length == 0 || line.StartsWith('#') || line.StartsWith('['))
-                continue;
-
-            var eq = line.IndexOf('=');
-            if (eq < 0) continue;
-            var key = line[..eq];
-            var value = line[(eq + 1)..];
-
-            var parts = key.Split('\\');
-            if (parts.Length == 2 && parts[1] == "url")
+            if (folder.Paused)
             {
-                var slot = accounts.GetValueOrDefault(parts[0]);
-                accounts[parts[0]] = (value, slot.User);
+                folder.Health = Health.Paused;
+                folder.Activity = SyncActivity.Paused;
             }
-            else if (parts.Length == 2 && parts[1] == "dav_user")
+            else if (!running)
             {
-                var slot = accounts.GetValueOrDefault(parts[0]);
-                accounts[parts[0]] = (slot.Url, value);
-            }
-            else if (parts.Length == 4 && parts[1] == "Folders")
-            {
-                var id = (parts[0], parts[2]);
-                if (!folderAcc.TryGetValue(id, out var draft))
-                    draft = new FolderDraft { AccountKey = parts[0] };
-                switch (parts[3])
-                {
-                    case "localPath":   draft.LocalPath   = value.Replace('/', Path.DirectorySeparatorChar); break;
-                    case "targetPath":  draft.TargetPath  = value; break;
-                    case "journalPath": draft.JournalPath = value; break;
-                    case "paused":      draft.Paused      = value.Equals("true", StringComparison.OrdinalIgnoreCase); break;
-                }
-                folderAcc[id] = draft;
+                folder.Health = Health.Offline;
+                folder.Activity = SyncActivity.Unknown;
             }
         }
 
-        foreach (var draft in folderAcc.Values)
+        return new ClientStatus
         {
-            if (string.IsNullOrWhiteSpace(draft.LocalPath))
-                continue;
-            accounts.TryGetValue(draft.AccountKey, out var acc);
-            var host = HostOf(acc.Url);
-            var user = acc.User;
-            var local = draft.LocalPath.TrimEnd('\\', '/');
-            result.Add(new FolderStatus
-            {
-                LocalPath    = local,
-                DisplayName  = Path.GetFileName(local),
-                Account      = string.IsNullOrEmpty(user) ? host : $"{user}@{host}",
-                DavUser      = user ?? "",
-                ServerHost   = host,
-                ServerUrl    = (acc.Url ?? "").TrimEnd('/'),
-                TargetPath   = string.IsNullOrWhiteSpace(draft.TargetPath) ? "/" : draft.TargetPath,
-                JournalPath  = draft.JournalPath,
-                Paused       = draft.Paused,
-                Health       = Health.Unknown
-            });
+            ProcessRunning = running,
+            Process = identity,
+            AmbiguousProcess = clients.Count > 1,
+            Folders = folders,
+            CheckedAt = _options.Clock.Now,
+            LogFile = location.NewestFile,
+            Observation = Observe(location, read, analysis)
+        };
+    }
+
+    private ConfigData ReadConfig()
+    {
+        if (!File.Exists(_options.ConfigPath))
+            return new ConfigData();
+        // An unreadable configuration is a failed scan (thrown), not an empty configuration.
+        return ConfigReader.Parse(File.ReadAllText(_options.ConfigPath));
+    }
+
+    private Observation Observe(LogLocation location, LogReadResult read, LogAnalysis analysis)
+    {
+        string source = location.Describe();
+        if (location.State != ObservationState.Ok)
+            return new Observation { State = location.State, Source = source, Reason = location.Reason };
+
+        DateTime now = _options.Clock.Now;
+        ObservationState state;
+        string reason = "";
+        if (read.UnreadableFiles >= location.Files.Count)
+        {
+            state = ObservationState.LogsUnreadable;
+            reason = "none of the recent log files could be read";
+        }
+        else if (read.TotalRecords == 0)
+        {
+            state = ObservationState.UnsupportedFormat;
+            reason = "no line of the recent log files starts with a timestamp";
+        }
+        else if (read.NewestRecord is DateTime newest && now - newest > _options.StaleAfter)
+        {
+            state = ObservationState.NoRecentRecords;
+            reason = $"the newest log record is from {FolderStatus.FormatTime(newest)}";
+        }
+        else if (analysis.RecognisedRecords == 0)
+        {
+            state = ObservationState.NoRecentRecords;
+            reason = "the recent log has no sync records";
+        }
+        else
+        {
+            state = ObservationState.Ok;
         }
 
-        return result.OrderBy(f => f.Account).ThenBy(f => f.DisplayName).ToList();
-    }
-
-    private static string HostOf(string? url)
-    {
-        if (string.IsNullOrWhiteSpace(url)) return "";
-        return Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.Host : url;
-    }
-
-    private static void ApplyLog(Dictionary<string, FolderStatus> folders)
-    {
-        var files = EnumerateRecentLogs().ToList();
-        FolderStatus? current = null;
-        string? lastCheckServerUrl = null;
-
-        foreach (var file in files)
+        return new Observation
         {
-            foreach (var (time, line) in ReadLogLines(file))
-            {
-                var started = SyncStarted.Match(line);
-                if (started.Success)
-                {
-                    current = MatchFolder(folders, started.Groups["folder"].Value);
-                    continue;
-                }
-
-                var finished = SyncFinished.Match(line);
-                if (finished.Success)
-                {
-                    current = MatchFolder(folders, finished.Groups["folder"].Value);
-                    if (current is not null)
-                        current.LastSync = time;
-                    continue;
-                }
-
-                var prop = PropagationError.Match(line);
-                if (prop.Success)
-                {
-                    var status = prop.Groups["status"].Value;
-                    if (status is "FileIgnored" or "SoftError")
-                    {
-                        // Ignored Office lock files etc. should not turn the icon red.
-                        continue;
-                    }
-                    ApplyError(current, folders, time, prop.Groups["path"].Value, prop.Groups["msg"].Value,
-                        isWarning: status is "RestorationError");
-                    continue;
-                }
-
-                var notified = NotificationError.Match(line);
-                if (notified.Success)
-                {
-                    ApplyError(current, folders, time, notified.Groups["path"].Value, notified.Groups["msg"].Value, isWarning: false);
-                    continue;
-                }
-
-                var engine = EngineResult.Match(line);
-                if (engine.Success && current is not null)
-                {
-                    if (engine.Groups["result"].Value == "without problem")
-                    {
-                        current.Health = Health.Ok;
-                        current.ErrorPath = null;
-                        current.ErrorMessage = null;
-                        current.LastError = null;
-                        current.LastSync = time;
-                    }
-                    else if (current.Health != Health.Error)
-                    {
-                        current.Health = Health.Error;
-                        current.LastError = time;
-                        current.ErrorMessage ??= "Sync finished with errors";
-                    }
-                    continue;
-                }
-
-                var etag = EtagCheck.Match(line);
-                if (etag.Success)
-                {
-                    if (int.TryParse(etag.Groups["secs"].Value, out int secs))
-                    {
-                        var ago = time.AddSeconds(-secs);
-                        foreach (var folder in FoldersForUrl(folders, etag.Groups["url"].Value))
-                        {
-                            if (folder.Health == Health.Unknown)
-                                folder.LastSync = ago;
-                        }
-                    }
-                    continue;
-                }
-
-                var etagDone = EtagFinished.Match(line);
-                if (etagDone.Success)
-                {
-                    string status = etagDone.Groups["status"].Value;
-                    var targets = FoldersForUrl(folders, etagDone.Groups["url"].Value);
-                    if (status.StartsWith("OK", StringComparison.OrdinalIgnoreCase))
-                    {
-                        foreach (var folder in targets)
-                        {
-                            if (folder.Health is Health.Unknown or Health.Disconnected)
-                                folder.Health = Health.Ok;
-                        }
-                    }
-                    else
-                    {
-                        MarkDisconnected(targets, time, status);
-                    }
-                    continue;
-                }
-
-                var created = CheckServerCreated.Match(line);
-                if (created.Success)
-                {
-                    lastCheckServerUrl = created.Groups["url"].Value;
-                    continue;
-                }
-
-                if (StatusPhpError.IsMatch(line) && lastCheckServerUrl is not null)
-                {
-                    MarkDisconnected(FoldersForUrl(folders, lastCheckServerUrl), time, "Server did not respond");
-                    continue;
-                }
-
-                var disc = AccountDisconnected.Match(line);
-                if (disc.Success)
-                {
-                    MarkDisconnected(FoldersForAccount(folders, disc.Groups["account"].Value), time, "Server unreachable");
-                    continue;
-                }
-
-                var conn = AccountConnected.Match(line);
-                if (conn.Success)
-                {
-                    foreach (var folder in FoldersForAccount(folders, conn.Groups["account"].Value))
-                    {
-                        if (folder.Health == Health.Disconnected)
-                        {
-                            folder.Health = Health.Unknown;
-                            folder.ErrorMessage = null;
-                            folder.ErrorPath = null;
-                            folder.LastError = null;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private static void MarkDisconnected(IEnumerable<FolderStatus> targets, DateTime time, string message)
-    {
-        foreach (var folder in targets)
-        {
-            folder.Health = Health.Disconnected;
-            folder.ErrorMessage = message;
-            folder.ErrorPath = null;
-            folder.LastError = time;
-        }
-    }
-
-    private static void ApplyError(
-        FolderStatus? current,
-        Dictionary<string, FolderStatus> folders,
-        DateTime time,
-        string relativePath,
-        string message,
-        bool isWarning)
-    {
-        var target = current ?? MatchFolderByRelative(folders, relativePath);
-        if (target is null) return;
-
-        var health = isWarning ? Health.Warning : Health.Error;
-        // Don't let a later warning overwrite an error in the same scan.
-        if (target.Health == Health.Error && health == Health.Warning)
-            return;
-
-        target.Health = health;
-        target.ErrorPath = relativePath;
-        target.ErrorMessage = string.IsNullOrWhiteSpace(message) ? "Sync error" : message;
-        target.LastError = time;
-    }
-
-    private static FolderStatus? MatchFolder(Dictionary<string, FolderStatus> folders, string path)
-        => folders.TryGetValue(Normalize(path), out var f) ? f : null;
-
-    private static List<FolderStatus> FoldersForUrl(Dictionary<string, FolderStatus> folders, string url)
-    {
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || string.IsNullOrEmpty(uri.Host))
-            return [];
-        return folders.Values
-            .Where(f => f.ServerHost.Equals(uri.Host, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-    }
-
-    private static List<FolderStatus> FoldersForAccount(Dictionary<string, FolderStatus> folders, string account)
-    {
-        if (string.IsNullOrWhiteSpace(account))
-            return [];
-        var exact = folders.Values
-            .Where(f => f.Account.Equals(account, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-        if (exact.Count > 0)
-            return exact;
-        return folders.Values
-            .Where(f => !string.IsNullOrEmpty(f.ServerHost)
-                        && account.Contains(f.ServerHost, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-    }
-
-    private static FolderStatus? MatchFolderByRelative(Dictionary<string, FolderStatus> folders, string relative)
-    {
-        // If we somehow missed Sync started, attribute the error to the only matching folder,
-        // or the first folder whose local tree could contain this relative path.
-        if (folders.Count == 1)
-            return folders.Values.First();
-        return folders.Values.FirstOrDefault(f =>
-            relative.StartsWith(f.DisplayName, StringComparison.OrdinalIgnoreCase));
-    }
-
-    private static string Normalize(string path)
-        => path.Replace('/', Path.DirectorySeparatorChar).TrimEnd('\\');
-
-    private static IEnumerable<FileInfo> EnumerateRecentLogs()
-    {
-        if (!Directory.Exists(LogDir))
-            yield break;
-
-        var cutoff = DateTime.Now.AddHours(-12);
-        var files = new DirectoryInfo(LogDir)
-            .GetFiles("*nextcloud.log*")
-            .Where(f => !f.Name.Contains("permanent_delete", StringComparison.OrdinalIgnoreCase))
-            .Where(f => f.LastWriteTime >= cutoff)
-            .OrderBy(f => f.LastWriteTimeUtc)
-            .ToList();
-
-        // Newest uncompressed current log plus the previous session — enough for "why is it red now?"
-        // Walk oldest→newest so later results overwrite.
-        foreach (var f in files.TakeLast(6))
-            yield return f;
-    }
-
-    private static IEnumerable<(DateTime Time, string Line)> ReadLogLines(FileInfo file)
-    {
-        FileStream fileStream;
-        try
-        {
-            if (!file.Exists)
-                yield break;
-            fileStream = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        }
-        catch (FileNotFoundException)
-        {
-            yield break;
-        }
-        catch (DirectoryNotFoundException)
-        {
-            yield break;
-        }
-
-        Stream stream = fileStream;
-        try
-        {
-            bool gzipped = file.Name.EndsWith(".gz", StringComparison.OrdinalIgnoreCase);
-            if (!gzipped && fileStream.Length > 1_500_000)
-            {
-                fileStream.Seek(-1_200_000, SeekOrigin.End);
-                while (fileStream.Position < fileStream.Length)
-                {
-                    int b = fileStream.ReadByte();
-                    if (b == '\n' || b < 0) break;
-                }
-            }
-
-            if (gzipped)
-                stream = new GZipStream(fileStream, CompressionMode.Decompress, leaveOpen: false);
-
-            using var reader = new StreamReader(stream, detectEncodingFromByteOrderMarks: true, bufferSize: 64 * 1024, leaveOpen: true);
-            string? line;
-            while ((line = reader.ReadLine()) is not null)
-            {
-                var m = Timestamp.Match(line);
-                if (!m.Success) continue;
-                if (!DateTime.TryParseExact(m.Groups["ts"].Value, "yyyy-MM-dd HH:mm:ss",
-                        CultureInfo.InvariantCulture, DateTimeStyles.None, out var ts))
-                    continue;
-                yield return (ts, line);
-            }
-        }
-        finally
-        {
-            stream.Dispose();
-        }
-    }
-
-    private struct FolderDraft
-    {
-        public string AccountKey;
-        public string? LocalPath;
-        public string? TargetPath;
-        public string? JournalPath;
-        public bool Paused;
+            State = state,
+            Source = source,
+            LastRecordAt = read.NewestRecord,
+            ShowsSyncStates = analysis.SawSyncStates,
+            Silent = state == ObservationState.NoRecentRecords && analysis.SawSyncStates
+                     && read.NewestRecord is DateTime quiet && now - quiet > _options.StaleAfter,
+            Reason = reason,
+            UnreadableFiles = read.UnreadableFiles,
+            UnattributedRecords = analysis.Unattributed
+        };
     }
 }

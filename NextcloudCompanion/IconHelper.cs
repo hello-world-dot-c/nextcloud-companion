@@ -25,6 +25,7 @@ public static class IconHelper
             Health.Error        => ColourError,
             Health.Offline      => ColourOffline,
             Health.Disconnected => ColourOffline,
+            Health.Paused       => ColourOffline,
             _                   => ColourUnknown
         };
 
@@ -88,6 +89,7 @@ public static class IconHelper
         Health.Error        => ColourError,
         Health.Offline      => ColourOffline,
         Health.Disconnected => ColourOffline,
+        Health.Paused       => ColourOffline,
         _                   => ColourUnknown
     };
 

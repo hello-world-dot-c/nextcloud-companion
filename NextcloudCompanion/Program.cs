@@ -79,26 +79,7 @@ internal static class Program
     private static void DumpStatus()
     {
         var status = new StatusMonitor().Scan();
-        var lines = new List<string>
-        {
-            $"Overall: {status.Overall}",
-            $"Client running: {status.ProcessRunning}",
-            $"Summary: {status.Summary}",
-            $"Checked: {status.CheckedAt:yyyy-MM-dd HH:mm:ss}",
-            $"Log: {status.LogFile}",
-            ""
-        };
-        foreach (var f in status.Folders)
-        {
-            lines.Add($"{f.DisplayName}  [{f.Account}]");
-            lines.Add($"  path:    {f.LocalPath}");
-            lines.Add($"  health:  {f.Health}{(f.Paused ? " (paused)" : "")}");
-            lines.Add($"  sync:    {f.LastSync}");
-            lines.Add($"  error:   {f.ErrorMessage}");
-            lines.Add($"  item:    {f.ErrorPath}");
-            lines.Add($"  when:    {f.LastError}");
-            lines.Add("");
-        }
+        var lines = StatusDump.Build(status, DateTime.Now, Settings.AutomaticRestartsUtc, Settings.AutoRestartNextcloud);
         var path = Path.Combine(Path.GetTempPath(), "nextcloud-status-dump.txt");
         File.WriteAllText(path, string.Join(Environment.NewLine, lines));
         Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });

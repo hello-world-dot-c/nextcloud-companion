@@ -9,9 +9,9 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>NextcloudCompanion</AssemblyName>
     <RootNamespace>NextcloudCompanion</RootNamespace>
-    <Version>1.1.0</Version>
-    <AssemblyVersion>1.1.0.0</AssemblyVersion>
-    <FileVersion>1.1.0.0</FileVersion>
+    <Version>1.2.0</Version>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+    <FileVersion>1.2.0.0</FileVersion>
     <Product>Nextcloud Companion</Product>
     <AssemblyTitle>Nextcloud Companion</AssemblyTitle>
     <Description>System tray companion for Nextcloud desktop: status, search, and full paths</Description>
@@ -27,6 +27,11 @@
   <ItemGroup>
     <!-- Also embedded as a resource: window title bars pick the right size from it at runtime (AppIcon.cs). -->
     <EmbeddedResource Include="app.ico" LogicalName="app.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The focused tests (NextcloudCompanion.Tests) use the internal parsing and policy types. -->
+    <InternalsVisibleTo Include="NextcloudCompanion.Tests" />
   </ItemGroup>
 
   <ItemGroup>

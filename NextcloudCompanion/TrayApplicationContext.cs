@@ -16,7 +16,19 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _itemNotify;
     private readonly ToolStripMenuItem _itemStartup;
     private readonly System.Windows.Forms.Timer _pollTimer;
-    private readonly StatusMonitor _monitor = new();
+    private readonly IProcessController _processes = new WindowsProcessController();
+    private readonly StatusMonitor _monitor;
+    private readonly RecoveryCoordinator _coordinator;
+    private readonly ClientRecoveryService _recovery;
+    private readonly ToolStripMenuItem _itemRestart;
+    private readonly ToolStripMenuItem _itemAutoRestart;
+    private readonly HashSet<string> _stallNotified = [];
+    private readonly HashSet<string> _recoveryNotified = [];
+    private bool _scanning;
+    private DecisionKind _lastDecisionKind;
+    private string _lastDecisionReason = "";
+    private RecoveryStatus _recoveryStatus = RecoveryStatus.None;
+    private CancellationTokenSource? _recoveryCts;
     private readonly Control _ui = new();
 
     // The DPI of the primary monitor when this process started. WinForms keeps deriving internals (menu item
@@ -38,6 +50,10 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     public TrayApplicationContext()
     {
+        _monitor = new StatusMonitor(new StatusMonitorOptions { Processes = _processes });
+        _coordinator = new RecoveryCoordinator(SystemClock.Instance, new SettingsRecoveryStore(), enabled: () => Settings.AutoRestartNextcloud);
+        _recovery = new ClientRecoveryService(_processes, _monitor, SystemClock.Instance);
+
         _itemStatus = new ToolStripLabel("Checking Nextcloud…")
         {
             ForeColor = SystemColors.GrayText,
@@ -59,6 +75,13 @@ public sealed class TrayApplicationContext : ApplicationContext
             Checked = startupOn
         };
 
+        _itemRestart = new ToolStripMenuItem("Restart Nextcloud to retry syncing…", null, OnRestartNextcloud);
+        _itemAutoRestart = new ToolStripMenuItem("Automatically restart Nextcloud when syncing appears stuck", null, OnToggleAutoRestart)
+        {
+            CheckOnClick = true,
+            Checked = Settings.AutoRestartNextcloud
+        };
+
         _menu = new ContextMenuStrip();
         _menu.Items.AddRange(
         [
@@ -74,11 +97,13 @@ public sealed class TrayApplicationContext : ApplicationContext
             new ToolStripMenuItem("New meeting…", null, (_, _) => ShowMeeting()),
             new ToolStripMenuItem("App passwords…", null, (_, _) => ShowAppPasswords()),
             new ToolStripMenuItem("Open Nextcloud", null, OnOpenNextcloud),
+            _itemRestart,
             new ToolStripMenuItem("Open log folder", null, OnOpenLogs),
             new ToolStripMenuItem("Copy latest error", null, OnCopyError),
             new ToolStripSeparator(),
             _itemNotify,
             _itemStartup,
+            _itemAutoRestart,
             new ToolStripSeparator(),
             new ToolStripMenuItem("Exit", null, OnExit)
         ]);
@@ -97,6 +122,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             _itemStatus.Text = TruncateTip(_monitor.Snapshot.Summary, 80);
             _itemNotify.Checked = Settings.NotifyOnError;
             _itemStartup.Checked = StartupShortcut.Exists();
+            UpdateRecoveryItems();
         };
 
         _trayIcon = new NotifyIcon
@@ -107,7 +133,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         };
         _trayIcon.MouseClick += OnTrayClick;
 
-        ApplyStatus(_monitor.Scan(), notify: false);
+        ProcessScan(_monitor.Scan(), notify: false);
 
         // Docking, undocking, a changed scale factor or an RDP session with another
         // resolution: redraw the tray icon and menu fonts for the new DPI.
@@ -115,6 +141,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         _ = _ui.Handle; // marshals the event back onto the UI thread
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
         SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
+        SystemEvents.PowerModeChanged += OnPowerModeChanged;
 
         _pollTimer = new System.Windows.Forms.Timer { Interval = 4000 };
         _pollTimer.Tick += OnPollTick;
@@ -176,16 +203,85 @@ public sealed class TrayApplicationContext : ApplicationContext
         OnExit(null, EventArgs.Empty);
     }
 
-    private void OnPollTick(object? sender, EventArgs e)
+    private async void OnPollTick(object? sender, EventArgs e)
     {
+        if (_scanning)
+            return;             // the previous scan has not finished: never overlap
+        _scanning = true;
         try
         {
-            ApplyStatus(_monitor.Scan(), notify: true);
+            var status = await Task.Run(() => _monitor.Scan());      // reads logs: not on the UI thread
+            if (!IsDisposedUi())
+                ProcessScan(status, notify: true);
         }
         catch (Exception ex)
         {
             ErrorLog.Write("Scan failed", ex);
         }
+        finally
+        {
+            _scanning = false;
+        }
+    }
+
+    private bool IsDisposedUi() => _ui.IsDisposed;
+
+    /// <summary>
+    /// A finished scan: put the recovery state on it, let the coordinator judge the evidence (it marks stalled folders),
+    /// show it, and start an automatic restart if one is due.
+    /// </summary>
+    private void ProcessScan(ClientStatus status, bool notify)
+    {
+        if (_recoveryStatus.Phase is RecoveryPhase.Resumed or RecoveryPhase.Failed
+            && _recoveryStatus.Since is DateTime since && DateTime.Now - since > TimeSpan.FromMinutes(5))
+            _recoveryStatus = RecoveryStatus.None;
+
+        status.Recovery = _recoveryStatus;
+        var decision = _coordinator.Observe(status);
+        status.RecoveryNote = Settings.AutoRestartNextcloud ? _coordinator.Note : null;
+        if (decision.Kind != _lastDecisionKind || (decision.Kind != DecisionKind.None && decision.Reason != _lastDecisionReason))
+        {
+            _lastDecisionKind = decision.Kind;
+            _lastDecisionReason = decision.Reason;
+            if (decision.Kind != DecisionKind.None)
+                ErrorLog.Recovery($"Decision: {decision.Kind}. {decision.Reason}");
+        }
+        ApplyStatus(status, notify);
+        NotifyRecoveryDecision(decision, notify);
+
+        if (notify && decision.Kind == DecisionKind.Due && !_recovery.Busy && !_recoveryStatus.Active)
+            StartAutomaticRestart(decision);
+    }
+
+    /// <summary>
+    /// Tells the user, once, when automatic recovery has recognised a stall but may not act, or cannot work at all.
+    /// (Starting a restart and its outcome are announced where they happen, in <see cref="RunRecoveryAsync"/>.)
+    /// </summary>
+    private void NotifyRecoveryDecision(RecoveryDecision decision, bool notify)
+    {
+        if (!notify || !Settings.AutoRestartNextcloud)
+            return;
+        if (decision.Kind == DecisionKind.Suppressed && decision.IncidentId is not null)
+        {
+            if (_recoveryNotified.Add(decision.IncidentId + "|" + decision.Reason))
+                _trayIcon.ShowBalloonTip(10000, "Nextcloud looks stuck - not restarted automatically",
+                    TruncateTip(decision.Reason, 240), ToolTipIcon.Warning);
+        }
+        else if (decision.Kind == DecisionKind.Disabled)
+        {
+            if (_recoveryNotified.Add("disabled|" + decision.Reason))
+                _trayIcon.ShowBalloonTip(10000, "Automatic restart cannot work with this Nextcloud",
+                    TruncateTip(decision.Reason, 240), ToolTipIcon.Warning);
+        }
+    }
+
+    private void OnPowerModeChanged(object? sender, PowerModeChangedEventArgs e)
+    {
+        if (e.Mode != PowerModes.Resume)
+            return;
+        // Raised on a system-events thread. Waiting right after a wake-up is normal: the coordinator starts over.
+        if (_ui.IsHandleCreated && !_ui.IsDisposed)
+            _ui.BeginInvoke(_coordinator.NotifyResume);
     }
 
     private void ApplyStatus(ClientStatus status, bool notify)
@@ -200,7 +296,8 @@ public sealed class TrayApplicationContext : ApplicationContext
         _currentIcon = newIcon;
         old?.Dispose();
 
-        _itemStatus.Text = TruncateTip(status.Summary, 80);
+        _itemStatus.Text = TruncateTip(status.Summary, 110);
+        NotifyStalls(status, notify);
 
         if (_window is { IsDisposed: false, Visible: true })
         {
@@ -246,7 +343,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             _window = null;
         }
         if (_window is null || _window.IsDisposed)
-            _window = new StatusWindow();
+            _window = new StatusWindow { RestartRequested = OnRestartNextcloud };
         return _window;
     }
 
@@ -334,6 +431,187 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
+    // ---- restarting Nextcloud -----------------------------------------------------------------------------------
+
+    /// <summary>Menu and flyout enable the restart only for exactly one identifiable client, and say why not otherwise.</summary>
+    private void UpdateRecoveryItems()
+    {
+        var snapshot = _monitor.Snapshot;
+        bool busy = _recovery.Busy || _recoveryStatus.Active;
+        if (busy)
+        {
+            _itemRestart.Enabled = false;
+            _itemRestart.ToolTipText = "A restart is already in progress.";
+        }
+        else if (snapshot.AmbiguousProcess)
+        {
+            _itemRestart.Enabled = false;
+            _itemRestart.ToolTipText = "More than one Nextcloud process is running; Companion will not guess which to restart.";
+        }
+        else if (snapshot.Process is null)
+        {
+            _itemRestart.Enabled = false;
+            _itemRestart.ToolTipText = "Nextcloud is not running.";
+        }
+        else
+        {
+            _itemRestart.Enabled = true;
+            _itemRestart.ToolTipText = "Closes Nextcloud and starts it again. This affects all of its accounts.";
+        }
+
+        _itemAutoRestart.Checked = Settings.AutoRestartNextcloud;
+        var decision = _coordinator.LastDecision;
+        _itemAutoRestart.ToolTipText = Settings.AutoRestartNextcloud && decision.Kind is DecisionKind.Disabled or DecisionKind.Suppressed
+            ? (decision.Kind == DecisionKind.Disabled ? "Not possible with this Nextcloud: " : "Not restarting now: ") + decision.Reason
+            : Settings.AutoRestartNextcloud && _coordinator.ForecastNote is { } note
+                ? "On. Companion is " + note + " unless Nextcloud starts syncing first."
+                : "Off by default. Restarts Nextcloud at most once per stall, one hour apart and twice per day.";
+    }
+
+    private void OnRestartNextcloud()
+    {
+        if (_recovery.Busy || _recoveryStatus.Active)
+            return;
+        var answer = Dialogs.Message(
+            "Nextcloud will be closed and started again in the background.\n\n"
+            + "This affects every account and folder of that Nextcloud, not only the one that seems stuck. "
+            + "Syncing starts again by itself afterwards, and Companion then checks whether it did.\n\n"
+            + "Restart Nextcloud now?",
+            AppInfo.Name, MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
+        if (answer == DialogResult.Yes)
+            _ = RunRecoveryAsync(automatic: false, force: null);
+    }
+
+    private void OnRestartNextcloud(object? sender, EventArgs e) => OnRestartNextcloud();
+
+    private void StartAutomaticRestart(RecoveryDecision decision)
+    {
+        // The attempt is recorded first. If the history cannot be saved, the limits could not survive a restart of
+        // Companion, so nothing is restarted.
+        if (!_coordinator.BeginAttempt(decision))
+        {
+            _trayIcon.ShowBalloonTip(8000, "Nextcloud was not restarted",
+                "Companion could not save its restart history, so it did not restart Nextcloud automatically.", ToolTipIcon.Warning);
+            return;
+        }
+        _trayIcon.ShowBalloonTip(10000, "Restarting Nextcloud automatically",
+            TruncateTip(decision.Reason + " Companion is restarting it now.", 240), ToolTipIcon.Warning);
+        _ = RunRecoveryAsync(automatic: true, force: null);
+    }
+
+    private async Task RunRecoveryAsync(bool automatic, ProcessIdentity? force)
+    {
+        _recoveryCts?.Cancel();
+        _recoveryCts = new CancellationTokenSource();
+        var token = _recoveryCts.Token;
+        var progress = new Progress<RecoveryStatus>(OnRecoveryProgress);     // created here: reports on the UI thread
+        RecoveryResult result;
+        try
+        {
+            result = await Task.Run(() => force is null
+                ? _recovery.RestartAsync(automatic, progress, token)
+                : _recovery.ForceRestartAsync(force, progress, token));
+        }
+        catch (Exception ex)
+        {
+            ErrorLog.Write("Restarting Nextcloud failed", ex);
+            result = new RecoveryResult(RecoveryResultKind.Refused, "Restarting Nextcloud failed: " + ex.Message);
+            OnRecoveryProgress(new RecoveryStatus { Phase = RecoveryPhase.Failed, Message = result.Message, Automatic = automatic, Since = DateTime.Now });
+        }
+
+        if (_ui.IsDisposed)
+            return;
+        ErrorLog.Recovery($"Nextcloud restart ({(automatic ? "automatic" : "manual")}): {result.Kind}. {result.Message}");
+
+        if (result.Kind is RecoveryResultKind.Refused or RecoveryResultKind.Busy)
+            OnRecoveryProgress(RecoveryStatus.None);     // nothing happened: do not leave a failure on screen
+
+        if (result.Kind == RecoveryResultKind.QuitFailed && !automatic && force is null)
+        {
+            // Force-closing is a separate, explicit choice that is never taken automatically.
+            var target = _monitor.Snapshot.Process;
+            var answer = Dialogs.Message(
+                result.Message + "\n\nForce Nextcloud to close now? Anything it has not finished writing may be lost.",
+                AppInfo.Name, MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+            if (answer == DialogResult.Yes && target is not null)
+            {
+                await RunRecoveryAsync(automatic: false, force: target);
+                return;
+            }
+        }
+        else if (automatic || result.Succeeded)
+        {
+            string title = result.Succeeded
+                ? (automatic ? "Nextcloud restarted automatically" : "Nextcloud restarted")
+                : (automatic ? "Automatic restart of Nextcloud did not succeed" : "Nextcloud restart");
+            _trayIcon.ShowBalloonTip(10000, title, TruncateTip(result.Message, 240),
+                result.Succeeded ? ToolTipIcon.Info : ToolTipIcon.Warning);
+        }
+        else
+        {
+            Dialogs.Message(result.Message, AppInfo.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
+        _ = Task.Run(() => _monitor.Scan()).ContinueWith(t => _ui.BeginInvoke(() => ProcessScan(t.Result, notify: false)),
+            TaskScheduler.Default);
+    }
+
+    private void OnRecoveryProgress(RecoveryStatus status)
+    {
+        _recoveryStatus = status;
+        var snapshot = _monitor.Snapshot;
+        snapshot.Recovery = status;
+        ApplyStatus(snapshot, notify: false);
+    }
+
+    private void OnToggleAutoRestart(object? sender, EventArgs e)
+    {
+        bool enable = _itemAutoRestart.Checked;
+        bool previous = Settings.AutoRestartNextcloud;
+        if (enable)
+        {
+            var answer = Dialogs.Message(
+                "When a folder has been \"waiting to start syncing\" for about 10 minutes and nothing else is syncing, "
+                + "Companion will close Nextcloud and start it again.\n\n"
+                + "That affects all of its accounts. It happens at most once per stall, at least an hour apart, and at most "
+                + "twice in 24 hours. It does not happen while an account is unreachable, needs you to sign in, or has a paused folder, "
+                + "and never if Nextcloud's log does not show enough to tell waiting from idle.\n\n"
+                + "Turn this on?",
+                AppInfo.Name, MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
+            if (answer != DialogResult.Yes)
+            {
+                _itemAutoRestart.Checked = previous;
+                return;
+            }
+        }
+
+        Settings.AutoRestartNextcloud = enable;
+        if (!Settings.Save())
+        {
+            // The choice would be lost at the next start: say so, and keep what is really saved.
+            Settings.AutoRestartNextcloud = previous;
+            _itemAutoRestart.Checked = previous;
+            Dialogs.Message("The setting could not be saved, so it was not changed.\n\n" + Settings.LastSaveError,
+                AppInfo.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    /// <summary>One notice per suspected stall (not one per scan).</summary>
+    private void NotifyStalls(ClientStatus status, bool notify)
+    {
+        var stalled = status.Folders.Where(f => f.Stalled).Select(f => f.Identity + "|" + f.ActivitySince?.Ticks).ToHashSet();
+        _stallNotified.RemoveWhere(k => !stalled.Contains(k));
+        if (stalled.Count == 0)
+            return;
+        bool fresh = stalled.Any(k => _stallNotified.Add(k));
+        if (fresh && notify && Settings.NotifyOnError)
+        {
+            _trayIcon.ShowBalloonTip(8000, "Nextcloud may be stuck waiting to sync",
+                "A folder has been waiting to start syncing for a long time. You can restart Nextcloud from the tray menu.",
+                ToolTipIcon.Warning);
+        }
+    }
+
     private void OnOpenRepository(object? s, EventArgs e)
     {
         try
@@ -368,9 +646,9 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private void OnOpenLogs(object? s, EventArgs e)
     {
-        var dir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "Nextcloud", "logs");
+        var dir = _monitor.Snapshot.LogFile is { } monitored
+            ? Path.GetDirectoryName(monitored)!
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Nextcloud", "logs");
         Directory.CreateDirectory(dir);
         Process.Start(new ProcessStartInfo { FileName = dir, UseShellExecute = true });
     }
@@ -435,6 +713,9 @@ public sealed class TrayApplicationContext : ApplicationContext
             _pollTimer.Stop();
             SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
             SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+            SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+            _recoveryCts?.Cancel();
+            _recoveryCts?.Dispose();
             _restartTimer.Dispose();
             _ui.Dispose();
             _pollTimer.Dispose();
