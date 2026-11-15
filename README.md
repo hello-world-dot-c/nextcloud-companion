@@ -11,9 +11,9 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/tray-menu.png" alt="Nextcloud Companion tray menu with the hint on the title line" width="250">
+  <img src="docs/images/tray-menu.png" alt="Nextcloud Companion tray menu: status line, restart and automatic restart entries" width="300">
   &nbsp;&nbsp;
-  <img src="docs/images/search-window.png" alt="Nextcloud Companion file search window, with synced and server-only results" width="560">
+  <img src="docs/images/search-window.png" alt="Nextcloud Companion file search window, with synced and server-only results" width="540">
 </p>
 
 The official client’s tray icon often stays silent: a red X with no message, a grey icon while another account is fine, or a green check while one server is down. The Files web app also hides the full path of a file. This app reads the desktop client’s own config, logs, and sync journals and shows that state directly. It does not replace the sync client.
