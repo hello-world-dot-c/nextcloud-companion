@@ -22,8 +22,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly ClientRecoveryService _recovery;
     private readonly ToolStripMenuItem _itemRestart;
     private readonly ToolStripMenuItem _itemAutoRestart;
-    private readonly HashSet<string> _stallNotified = [];
-    private readonly HashSet<string> _recoveryNotified = [];
+    private readonly Notifier _notifier;
     private bool _scanning;
     private DecisionKind _lastDecisionKind;
     private string _lastDecisionReason = "";
@@ -53,6 +52,9 @@ public sealed class TrayApplicationContext : ApplicationContext
         _monitor = new StatusMonitor(new StatusMonitorOptions { Processes = _processes });
         _coordinator = new RecoveryCoordinator(SystemClock.Instance, new SettingsRecoveryStore(), enabled: () => Settings.AutoRestartNextcloud);
         _recovery = new ClientRecoveryService(_processes, _monitor, SystemClock.Instance);
+        _coordinator.Diagnostic += ErrorLog.Recovery;
+        _notifier = new Notifier(new WindowsToastSink(ShowBalloon), SystemClock.Instance);
+        _notifier.Shown += ErrorLog.Recovery;
 
         _itemStatus = new ToolStripLabel("Checking Nextcloud…")
         {
@@ -263,17 +265,22 @@ public sealed class TrayApplicationContext : ApplicationContext
             return;
         if (decision.Kind == DecisionKind.Suppressed && decision.IncidentId is not null)
         {
-            if (_recoveryNotified.Add(decision.IncidentId + "|" + decision.Reason))
-                _trayIcon.ShowBalloonTip(10000, "Nextcloud looks stuck - not restarted automatically",
-                    TruncateTip(decision.Reason, 240), ToolTipIcon.Warning);
+            _notifier.Show("recovery-suppressed|" + decision.IncidentId + "|" + decision.Reason,
+                "Nextcloud looks stuck - not restarted automatically", decision.Reason,
+                NotificationLevel.Warning, TimeSpan.FromHours(12));
         }
         else if (decision.Kind == DecisionKind.Disabled)
         {
-            if (_recoveryNotified.Add("disabled|" + decision.Reason))
-                _trayIcon.ShowBalloonTip(10000, "Automatic restart cannot work with this Nextcloud",
-                    TruncateTip(decision.Reason, 240), ToolTipIcon.Warning);
+            _notifier.Show("recovery-disabled|" + decision.Reason,
+                "Automatic restart cannot work with this Nextcloud", decision.Reason,
+                NotificationLevel.Warning, TimeSpan.FromHours(12));
         }
     }
+
+    /// <summary>Fallback when Windows toasts cannot be used: the classic tray balloon.</summary>
+    private void ShowBalloon(string title, string text, NotificationLevel level)
+        => _trayIcon.ShowBalloonTip(10000, title, TruncateTip(text, 240),
+            level switch { NotificationLevel.Error => ToolTipIcon.Error, NotificationLevel.Warning => ToolTipIcon.Warning, _ => ToolTipIcon.Info });
 
     private void OnPowerModeChanged(object? sender, PowerModeChangedEventArgs e)
     {
@@ -311,11 +318,9 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         if (notify && Settings.NotifyOnError && becameProblem)
         {
-            _trayIcon.ShowBalloonTip(
-                8000,
+            _notifier.Show("problem|" + status.Summary,
                 status.Overall == Health.Disconnected ? "Nextcloud server unreachable" : "Nextcloud sync error",
-                TruncateTip(status.Summary, 240),
-                ToolTipIcon.Error);
+                status.Summary, NotificationLevel.Error, TimeSpan.FromMinutes(15));
         }
 
         _lastHealth = status.Overall;
@@ -490,12 +495,13 @@ public sealed class TrayApplicationContext : ApplicationContext
         // Companion, so nothing is restarted.
         if (!_coordinator.BeginAttempt(decision))
         {
-            _trayIcon.ShowBalloonTip(8000, "Nextcloud was not restarted",
-                "Companion could not save its restart history, so it did not restart Nextcloud automatically.", ToolTipIcon.Warning);
+            _notifier.Show("history-unsaved", "Nextcloud was not restarted",
+                "Companion could not save its restart history, so it did not restart Nextcloud automatically.",
+                NotificationLevel.Warning, TimeSpan.FromHours(1));
             return;
         }
-        _trayIcon.ShowBalloonTip(10000, "Restarting Nextcloud automatically",
-            TruncateTip(decision.Reason + " Companion is restarting it now.", 240), ToolTipIcon.Warning);
+        _notifier.Show("auto-restart", "Restarting Nextcloud automatically",
+            decision.Reason + " Companion is restarting it now.", NotificationLevel.Warning, TimeSpan.FromSeconds(30));
         _ = RunRecoveryAsync(automatic: true, force: null);
     }
 
@@ -544,8 +550,8 @@ public sealed class TrayApplicationContext : ApplicationContext
             string title = result.Succeeded
                 ? (automatic ? "Nextcloud restarted automatically" : "Nextcloud restarted")
                 : (automatic ? "Automatic restart of Nextcloud did not succeed" : "Nextcloud restart");
-            _trayIcon.ShowBalloonTip(10000, title, TruncateTip(result.Message, 240),
-                result.Succeeded ? ToolTipIcon.Info : ToolTipIcon.Warning);
+            _notifier.Show("restart-result", title, result.Message,
+                result.Succeeded ? NotificationLevel.Info : NotificationLevel.Warning, TimeSpan.FromSeconds(30));
         }
         else
         {
@@ -596,20 +602,17 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
-    /// <summary>One notice per suspected stall (not one per scan).</summary>
+    /// <summary>
+    /// At most one notice every ninety minutes about a suspected stall, and none when automatic restart is on (it
+    /// announces what it does itself). The suspicion may come and go from one scan to the next; the notice must not.
+    /// </summary>
     private void NotifyStalls(ClientStatus status, bool notify)
     {
-        var stalled = status.Folders.Where(f => f.Stalled).Select(f => f.Identity + "|" + f.ActivitySince?.Ticks).ToHashSet();
-        _stallNotified.RemoveWhere(k => !stalled.Contains(k));
-        if (stalled.Count == 0)
+        if (!notify || !Settings.NotifyOnError || Settings.AutoRestartNextcloud || !status.Folders.Any(f => f.Stalled))
             return;
-        bool fresh = stalled.Any(k => _stallNotified.Add(k));
-        if (fresh && notify && Settings.NotifyOnError)
-        {
-            _trayIcon.ShowBalloonTip(8000, "Nextcloud may be stuck waiting to sync",
-                "A folder has been waiting to start syncing for a long time. You can restart Nextcloud from the tray menu.",
-                ToolTipIcon.Warning);
-        }
+        _notifier.Show("stall", "Nextcloud may be stuck waiting to sync",
+            "A folder has been waiting to start syncing for a long time. You can restart Nextcloud from the tray menu.",
+            NotificationLevel.Warning, TimeSpan.FromMinutes(90));
     }
 
     private void OnOpenRepository(object? s, EventArgs e)

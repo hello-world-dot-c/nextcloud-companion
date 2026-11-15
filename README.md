@@ -30,7 +30,7 @@ The installer is not code-signed, so Windows SmartScreen may warn the first time
 
 - **Tray status.** A badge for every synced folder: green check, grey dash, or red X. The tooltip and the menu’s first line say which folder or server is in trouble.
 - **Status flyout.** Click the icon, or choose **Show status**, for each folder’s account, path, last sync, and the latest error.
-- **Notifications.** A balloon when overall health becomes an error or a disconnect, or when that summary changes. Already-down servers do not notify on startup. Toggle with **Notify when a new error appears**.
+- **Notifications.** Windows notifications (the system toast framework) when overall health becomes an error or a disconnect, and for restarts (see below). Already-down servers do not notify on startup. Toggle the error notices with **Notify when a new error appears**; Windows lists the app under Settings, System, Notifications, where sound and banners can be changed or switched off. If Windows toasts cannot be used, the tray balloon is the fallback.
 - **File search.** Find a file or folder by part of its name and see the full Nextcloud path (the part the web UI omits). Results can be opened locally or in the Files app. By default it also searches the whole server for files that are not in a synced folder (see below). Up to 100 recent queries are kept.
 - **App passwords.** One place (menu: **App passwords…**) to save the app password of each account. They are used for the meeting form and for searching the server.
 - **New meeting.** Create an event on a calendar you can write, including internal people and groups. This avoids the Calendar app’s attendee search, which does not reliably find internal users or groups.
@@ -65,7 +65,7 @@ Overall health uses that order: offline, then any folder error, then any unreach
 
 Each folder also shows what it is doing now (idle, preparing, syncing, waiting to start, paused) and since when, the time of its last successful sync, and the log file and age of the newest record behind the statement. If the log cannot be found or read, is in a format Companion does not know, or has no recent records, the summary says "Sync status unavailable" or "No recent sync activity was found" instead of repeating an old result. A failed scan publishes that state too; it never leaves an apparently fresh result in place.
 
-Ignored items and soft errors (Office lock files and similar) do not turn the icon red. A server that never answers is a disconnect, not a sync error, including the balloon title.
+Ignored items and soft errors (Office lock files and similar) do not turn the icon red. A server that never answers is a disconnect, not a sync error, including the notification title.
 
 Sources, all under the user profile unless the client was configured otherwise:
 
@@ -99,7 +99,7 @@ A stalled client may stop writing to its log altogether. When the log has sync s
 
 You can switch the option on or off while Companion runs; evidence collected while it was off counts. While a stall is being counted down, the tooltip and menu say "attempting automatic recovery in about N minutes".
 
-Windows notifications announce an automatic restart when it starts and how it ended (resumed, not confirmed, or failed), when a stall is recognised but the limits prevent a restart, and when the log cannot support automatic restart at all.
+Windows notifications announce an automatic restart when it starts and how it ended (resumed, not confirmed, or failed), when a stall is recognised but the limits prevent a restart, and when the log cannot support automatic restart at all. Notifications are rate limited: each kind is shown at most once per interval (a stall notice once per ninety minutes, and not at all while automatic restart is on, since that announces its own actions), and at most four appear per minute, however often a condition changes.
 
 An incident gets one automatic attempt. At most 2 automatic restarts happen per 24 hours and at least one hour apart, and that history is saved, so restarting Companion does not reset it. If the history cannot be saved, no automatic restart is made. If the log has no sync state records at all, the feature stays off and says why. Automatic restarts never kill a process.
 
@@ -161,6 +161,7 @@ Output: `artifacts\installer\NextcloudCompanion-Setup-<version>.exe`. The same t
 | `NextcloudCompanion/Models.cs`, `StatusDump.cs` | Status model and computed summary; `--dump` text |
 | `NextcloudCompanion/ClientProcess.cs`, `ClientRecovery.cs` | Process control and the restart sequence with verification |
 | `NextcloudCompanion/RecoveryCoordinator.cs` | When waiting counts as stuck and an automatic restart is allowed |
+| `NextcloudCompanion/Notifications.cs` | Windows toast notifications with rate limiting |
 | `NextcloudCompanion.Tests/` | Tests (see below), with sanitized client fixtures |
 | `NextcloudCompanion/TrayApplicationContext.cs` | Tray icon, menu, polling, notifications |
 | `NextcloudCompanion/StatusWindow.cs` | Status flyout |

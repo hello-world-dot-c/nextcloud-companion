@@ -13,6 +13,7 @@ internal sealed class SearchWindow : DpiForm
 {
     private readonly Func<IReadOnlyList<FolderStatus>> _folders;
     private readonly ComboBox _query;
+    private readonly TableLayoutPanel _searchRow;
     private readonly Button _clearHistory;
     private readonly Button _searchButton;
     private readonly CheckBox _includeServer;
@@ -67,11 +68,12 @@ internal sealed class SearchWindow : DpiForm
             Margin = new Padding(0, 0, 0, gap / 2)
         };
 
-        var searchRow = new TableLayoutPanel
+        var searchRow = _searchRow = new TableLayoutPanel
         {
             ColumnCount = 4,
             RowCount = 1,
             AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,     // GrowOnly keeps the tallest size ever laid out
             Dock = DockStyle.Fill,
             Margin = new Padding(0, 0, 0, gap)
         };
@@ -83,7 +85,8 @@ internal sealed class SearchWindow : DpiForm
 
         _query = new ComboBox
         {
-            Dock = DockStyle.Fill,
+            // Left and right only: like the check box and the buttons it is centred vertically in the row.
+            Anchor = AnchorStyles.Left | AnchorStyles.Right,
             DropDownStyle = ComboBoxStyle.DropDown,
             AutoCompleteMode = AutoCompleteMode.SuggestAppend,
             AutoCompleteSource = AutoCompleteSource.ListItems,
@@ -100,15 +103,24 @@ internal sealed class SearchWindow : DpiForm
 
         _searchButton = ActionButton("Search");
         _searchButton.Margin = new Padding(0);
+        _searchButton.Anchor = AnchorStyles.Left;
         _searchButton.Click += (_, _) => RunSearch();
 
         _clearHistory = ActionButton("Clear history");
         _clearHistory.Click += (_, _) => ClearHistory();
+        _clearHistory.Anchor = AnchorStyles.Left;
 
+        // Fixed size in design pixels (the window scales it with the DPI). An AutoSize check box is measured while
+        // the table is still negotiating the column width, wraps its text onto two lines, and then keeps that
+        // height: the row grows and the text sits below the buttons on high-DPI screens.
+        const string serverText = "Also search the server(s)";
         _includeServer = new CheckBox
         {
-            Text = "Also search the server(s)",
-            AutoSize = true,
+            Text = serverText,
+            AutoSize = false,
+            Size = new Size(TextRenderer.MeasureText(serverText, Font).Width + Font.Height + 8, Font.Height + 6),
+            TextAlign = ContentAlignment.MiddleLeft,
+            CheckAlign = ContentAlignment.MiddleLeft,
             UseMnemonic = false,
             Checked = Settings.SearchServer,
             Anchor = AnchorStyles.Left,
@@ -211,7 +223,25 @@ internal sealed class SearchWindow : DpiForm
         CaptureDesign();
     }
 
-    protected override void OnDpiApplied() => FitColumns();
+    protected override void OnDpiApplied()
+    {
+        RefreshSearchRow();
+        FitColumns();
+    }
+
+    /// <summary>
+    /// The row of the search box, check box and buttons keeps the height it was measured at before the controls were
+    /// scaled (the combo box reports a much taller size then), which pushed the search box to the top of a row that is
+    /// far taller than its contents. Touching a property of the combo box makes the table measure it again.
+    /// </summary>
+    private void RefreshSearchRow()
+    {
+        _searchRow.SuspendLayout();
+        _query.Dock = DockStyle.Fill;
+        _query.Dock = DockStyle.None;
+        _query.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        _searchRow.ResumeLayout(true);
+    }
 
     /// <summary>
     /// Size to the screen (never larger than the working area) and open
@@ -303,6 +333,12 @@ internal sealed class SearchWindow : DpiForm
         FitAndPlaceBottomRight(_placeNear);
         FitColumns();
         _query.Focus();
+        // After the base class has re-applied the scale (its work is posted before this): measure the row again.
+        BeginInvoke(() =>
+        {
+            if (!IsDisposed)
+                RefreshSearchRow();
+        });
     }
 
     private void FitAndPlaceBottomRight(Point near)

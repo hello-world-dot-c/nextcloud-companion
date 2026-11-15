@@ -16,8 +16,15 @@ public sealed class SystemClock : IClock
 {
     public static readonly SystemClock Instance = new();
     private static readonly Stopwatch Mono = Stopwatch.StartNew();
+
+    // Unbiased interrupt time stops while the computer sleeps (also in modern standby); a Stopwatch keeps running.
+    [DllImport("kernel32.dll")]
+    private static extern bool QueryUnbiasedInterruptTime(out ulong unbiasedTime100ns);
+
     public DateTime Now => DateTime.Now;
-    public long MonotonicMilliseconds => Mono.ElapsedMilliseconds;
+
+    public long MonotonicMilliseconds
+        => QueryUnbiasedInterruptTime(out ulong t) ? (long)(t / 10_000) : Mono.ElapsedMilliseconds;
 }
 
 /// <summary>
@@ -71,7 +78,7 @@ public sealed class WindowsProcessController : IProcessController
             {
                 try
                 {
-                    if (process.SessionId != mySession)
+                    if (process.SessionId != mySession || IsQuitHelper(process.Id))
                         continue;
                     DateTime start = SafeStartTime(process);
                     string? path = null;
@@ -117,25 +124,65 @@ public sealed class WindowsProcessController : IProcessController
         }
     }
 
+    // The "nextcloud --quit" process we start is itself a nextcloud.exe. It must not count as a second client, and
+    // it may outlive its usefulness if the running client is slow to answer.
+    private readonly object _helperGate = new();
+    private Process? _quitHelper;
+
+    private bool IsQuitHelper(int id)
+    {
+        lock (_helperGate)
+            return _quitHelper is { } helper && helper.Id == id;
+    }
+
+    private void EndQuitHelper()
+    {
+        lock (_helperGate)
+        {
+            if (_quitHelper is not { } helper)
+                return;
+            _quitHelper = null;
+            try
+            {
+                if (!helper.HasExited)
+                {
+                    helper.Kill();
+                    ErrorLog.Recovery("The quit helper was still running and was ended.");
+                }
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
+            {
+                // already gone
+            }
+            helper.Dispose();
+        }
+    }
+
     public async Task<bool> RequestQuitAsync(string exePath, IReadOnlyList<string> contextArguments, CancellationToken cancellationToken)
     {
+        EndQuitHelper();
         var info = NewStartInfo(exePath, ["--quit", .. contextArguments]);
         ErrorLog.Recovery($"Asking Nextcloud to quit: \"{exePath}\" {string.Join(" ", info.ArgumentList)}");
-        using var process = Process.Start(info);
+        var process = Process.Start(info);
         if (process is null)
             return false;
+        lock (_helperGate)
+            _quitHelper = process;
+
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(20));
         try
         {
             await process.WaitForExitAsync(timeout.Token);
             ErrorLog.Recovery($"Quit request finished with exit code {process.ExitCode}.");
-            return true;
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            return false;
+            // A client that has just woken up, or is busy, answers slowly. The request was delivered; what counts is
+            // whether that client exits, and the caller waits for exactly that.
+            ErrorLog.Recovery("The quit request did not finish within 20 s; waiting for the client to exit.");
         }
+        return true;
     }
 
     public async Task<bool> WaitForExitAsync(ProcessIdentity identity, TimeSpan timeout, CancellationToken cancellationToken)
@@ -147,11 +194,15 @@ public sealed class WindowsProcessController : IProcessController
                 return true;
             await Task.Delay(500, cancellationToken);
         }
-        return !IsSame(identity);
+        bool gone = !IsSame(identity);
+        if (!gone)
+            EndQuitHelper();
+        return gone;
     }
 
     public void Launch(string exePath, IReadOnlyList<string> arguments)
     {
+        EndQuitHelper();
         ErrorLog.Recovery($"Launching: \"{exePath}\" {string.Join(" ", arguments.Select(x => x.Contains(' ') ? $"\"{x}\"" : x))}");
         // Started the way the shell starts a program (as "Open Nextcloud" and the Start menu do): a restart that
         // launched it as a bare child process was seen to leave no client running.

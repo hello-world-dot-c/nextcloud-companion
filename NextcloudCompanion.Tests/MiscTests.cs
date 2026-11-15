@@ -63,4 +63,68 @@ public sealed class MiscTests
         Assert.Equal("--confdir|C:\\cfg|--logfile=C:\\l.txt|--logexpire|24|--logflush", string.Join("|", args));
         Assert.Equal(0, ClientRecoveryService.ContextArguments(null).Count);
     }
+
+    [Fact]
+    public void TheSystemClockIsMonotonicAndTracksRealTime()
+    {
+        long a = SystemClock.Instance.MonotonicMilliseconds;
+        Thread.Sleep(300);
+        long b = SystemClock.Instance.MonotonicMilliseconds;
+        Assert.True(b - a >= 250 && b - a < 2000, $"300 ms of real time measured as {b - a} ms");
+    }
+
+    private sealed class RecordingSink : INotificationSink
+    {
+        public List<string> Titles { get; } = [];
+        public void Show(string title, string text, NotificationLevel level) => Titles.Add(title);
+    }
+
+    [Fact]
+    public void ANotificationIsShownAtMostOncePerIntervalForItsKey()
+    {
+        var clock = new FakeClock();
+        var sink = new RecordingSink();
+        var notifier = new Notifier(sink, clock);
+
+        // A condition that flaps every four seconds for ten minutes asks for the same notice again and again.
+        for (int i = 0; i < 150; i++)
+        {
+            notifier.Show("stall", "stuck", "text", NotificationLevel.Warning, TimeSpan.FromMinutes(90));
+            clock.Advance(TimeSpan.FromSeconds(4));
+        }
+        Assert.Equal(1, sink.Titles.Count);
+
+        clock.Advance(TimeSpan.FromMinutes(91));
+        Assert.True(notifier.Show("stall", "stuck", "text", NotificationLevel.Warning, TimeSpan.FromMinutes(90)), "shown again after the interval");
+        Assert.Equal(2, sink.Titles.Count);
+    }
+
+    [Fact]
+    public void TheNumberOfNotificationsPerMinuteIsCapped()
+    {
+        var clock = new FakeClock();
+        var sink = new RecordingSink();
+        var notifier = new Notifier(sink, clock);
+
+        for (int i = 0; i < 30; i++)                      // thirty different keys within seconds
+        {
+            notifier.Show("k" + i, "t" + i, "x", NotificationLevel.Info, TimeSpan.Zero);
+            clock.Advance(TimeSpan.FromMilliseconds(500));
+        }
+        Assert.Equal(Notifier.MaxPerMinute, sink.Titles.Count, "no more than the cap within a minute");
+
+        clock.Advance(TimeSpan.FromMinutes(2));
+        Assert.True(notifier.Show("later", "t", "x", NotificationLevel.Info, TimeSpan.Zero), "allowed again afterwards");
+    }
+
+    [Fact]
+    public void ADifferentKeyIsIndependent()
+    {
+        var clock = new FakeClock();
+        var sink = new RecordingSink();
+        var notifier = new Notifier(sink, clock);
+        notifier.Show("a", "A", "x", NotificationLevel.Info, TimeSpan.FromHours(1));
+        notifier.Show("b", "B", "x", NotificationLevel.Info, TimeSpan.FromHours(1));
+        Assert.Equal("A,B", string.Join(",", sink.Titles));
+    }
 }

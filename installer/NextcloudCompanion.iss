@@ -77,6 +77,11 @@ Type: filesandordirs; Name: "{app}\tr"; Check: IsOldSelfContainedInstall
 Type: filesandordirs; Name: "{app}\zh-Hans"; Check: IsOldSelfContainedInstall
 Type: filesandordirs; Name: "{app}\zh-Hant"; Check: IsOldSelfContainedInstall
 
+[Registry]
+; The app registers itself under this id the first time it shows a Windows notification (see Notifications.cs);
+; this entry only makes sure the registration is removed again on uninstall.
+Root: HKCU; Subkey: "Software\Classes\AppUserModelId\hello-world-dot-c.NextcloudCompanion"; ValueType: string; ValueName: "DisplayName"; ValueData: "{#AppName}"; Flags: uninsdeletekey
+
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
 

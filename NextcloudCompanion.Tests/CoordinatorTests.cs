@@ -416,4 +416,51 @@ public sealed class CoordinatorTests
 
         Assert.Equal(DecisionKind.Suppressed, coordinator.Observe(status).Kind);
     }
+
+    [Fact]
+    public void ASleepThatWindowsDidNotAnnounceStartsTheEvidenceOver()
+    {
+        // Observed for 11 minutes, then the computer sleeps for ten hours. No resume event reaches Companion; the
+        // monotonic clock stood still (or, in the second run, kept running); the first scan after waking must not
+        // restart anything, and neither may the following minutes.
+        foreach (bool monotonicKeepsRunning in new[] { false, true })
+        {
+            var coordinator = Coordinator();
+            var since = _clock.Now.AddMinutes(-1);
+            var messages = new List<string>();
+            coordinator.Diagnostic += messages.Add;
+            ObserveWaiting(coordinator, since, TimeSpan.FromMinutes(11), out _);
+
+            if (monotonicKeepsRunning)
+                _clock.Advance(TimeSpan.FromHours(10));
+            else
+                _clock.JumpWallClock(TimeSpan.FromHours(10));
+
+            var wakeSince = _clock.Now.AddHours(-10);
+            for (int i = 0; i < 100; i++)                      // the first ~7 minutes after waking
+            {
+                var decision = coordinator.Observe(Status(_process, true, Folder("A", SyncActivity.Waiting, at: wakeSince)));
+                Assert.True(decision.Kind != DecisionKind.Due, $"restart right after waking (run {monotonicKeepsRunning}, scan {i})");
+                _clock.Advance(TimeSpan.FromSeconds(4));
+            }
+            Assert.True(messages.Any(m => m.Contains("Pause detected")), "the pause is written to the log");
+        }
+    }
+
+    [Fact]
+    public void AfterTheGraceAndAFreshTenMinutesAStallIsStillActedOn()
+    {
+        var coordinator = Coordinator();
+        var since = _clock.Now.AddMinutes(-1);
+        ObserveWaiting(coordinator, since, TimeSpan.FromMinutes(5), out _);
+        _clock.JumpWallClock(TimeSpan.FromHours(10));
+
+        var decision = RecoveryDecision.None;
+        for (int i = 0; i < 400 && decision.Kind != DecisionKind.Due; i++)
+        {
+            decision = coordinator.Observe(Status(_process, true, Folder("A", SyncActivity.Waiting, at: since)));
+            _clock.Advance(TimeSpan.FromSeconds(4));
+        }
+        Assert.Equal(DecisionKind.Due, decision.Kind);
+    }
 }

@@ -32,7 +32,7 @@ public sealed record RecoveryResult(RecoveryResultKind Kind, string Message)
 public sealed class RecoveryOptions
 {
     /// <summary>How long to wait for the original process to exit after <c>--quit</c>.</summary>
-    public TimeSpan QuitWait { get; init; } = TimeSpan.FromSeconds(45);
+    public TimeSpan QuitWait { get; init; } = TimeSpan.FromSeconds(90);
     /// <summary>How long after the relaunch to look for evidence that syncing resumed.</summary>
     public TimeSpan VerifyWait { get; init; } = TimeSpan.FromMinutes(3);
     /// <summary>How long after a launch a client process must appear before the start is tried a second way.</summary>

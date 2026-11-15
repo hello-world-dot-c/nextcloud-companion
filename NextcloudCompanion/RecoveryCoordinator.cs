@@ -86,6 +86,11 @@ public sealed class RecoveryCoordinator
     private TimeSpan _processAgeWhenSeen;
     private long? _lastResume;
     private long? _lastAttempt;
+    private long? _lastObserveMono;
+    private DateTime? _lastObserveWall;
+
+    /// <summary>Raised when the coordinator discards its evidence (resume, long pause); for the recovery log.</summary>
+    public event Action<string>? Diagnostic;
 
     public RecoveryCoordinator(IClock clock, IRecoveryStore store, RecoveryPolicy? policy = null, Func<bool>? enabled = null)
     {
@@ -121,6 +126,7 @@ public sealed class RecoveryCoordinator
         {
             _lastResume = _clock.MonotonicMilliseconds;
             _episodes.Clear();
+            Diagnostic?.Invoke("Windows reported a resume: stall evidence discarded, grace period started.");
         }
     }
 
@@ -158,6 +164,7 @@ public sealed class RecoveryCoordinator
         DateTime now = _clock.Now;
         long mono = _clock.MonotonicMilliseconds;
         bool enabled = _enabled();
+        DetectPause(now, mono);
 
         if (status.Process is null || status.AmbiguousProcess)
         {
@@ -307,6 +314,30 @@ public sealed class RecoveryCoordinator
         Forecast = TimeSpan.Zero;
         return new RecoveryDecision(DecisionKind.Due,
             $"{first.DisplayName} has been waiting to start syncing since {FolderStatus.FormatTime(firstEpisode.WaitingSince)}.", incident);
+    }
+
+    /// <summary>
+    /// Windows does not always announce a resume (modern standby), so a pause is also recognised from the scans
+    /// themselves: scans are seconds apart, so a long gap means the computer (or Companion) was not running, and a
+    /// wall clock that moved differently from the monotonic one means it slept or the clock was set.
+    /// </summary>
+    private void DetectPause(DateTime now, long mono)
+    {
+        if (_lastObserveMono is long lastMono && _lastObserveWall is DateTime lastWall)
+        {
+            var monoGap = TimeSpan.FromMilliseconds(mono - lastMono);
+            var wallGap = now - lastWall;
+            var drift = (wallGap - monoGap).Duration();
+            if (monoGap > TimeSpan.FromSeconds(60) || drift > TimeSpan.FromSeconds(30))
+            {
+                _lastResume = mono;
+                _episodes.Clear();
+                Diagnostic?.Invoke($"Pause detected between scans (clock {wallGap.TotalMinutes:0.#} min, awake time {monoGap.TotalMinutes:0.#} min): "
+                                   + "stall evidence discarded, grace period started.");
+            }
+        }
+        _lastObserveMono = mono;
+        _lastObserveWall = now;
     }
 
     /// <summary>A reason why waiting is expected for this folder right now (so it is not a stall), or null.</summary>
